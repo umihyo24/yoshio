@@ -23,8 +23,8 @@ const windowStub = new EventTargetStub();
 const sandbox = { console, Math, Object, Boolean, Number, Set, document: { getElementById: () => canvas }, window: windowStub, requestAnimationFrame: noop };
 vm.createContext(sandbox);
 const gameSource = fs.readFileSync(path.join(__dirname, "..", "game.js"), "utf8");
-vm.runInContext(`${gameSource}\n;globalThis.testApi={CONFIG,gameState,createStartingAmmo,resetGame,update,updateInput,updatePlayer,updateEnemies,updateProjectiles,updateShards,cleanup,cycleAmmo,solids,explode,activateCheckpoint,finish,shoot,damageEnemy,triggerShatter};`, sandbox);
-const { CONFIG, gameState, createStartingAmmo, resetGame, update, updateInput, updatePlayer, updateEnemies, updateProjectiles, updateShards, cleanup, cycleAmmo, solids, explode, activateCheckpoint, finish, shoot, damageEnemy, triggerShatter } = sandbox.testApi;
+vm.runInContext(`${gameSource}\n;globalThis.testApi={CONFIG,gameState,createStartingAmmo,resetGame,update,updateInput,updatePlayer,updateEnemies,updateProjectiles,updateShards,cleanup,cycleAmmo,solids,explode,activateCheckpoint,finish,shoot,damageEnemy,triggerShatter,conveyorVelocity};`, sandbox);
+const { CONFIG, gameState, createStartingAmmo, resetGame, update, updateInput, updatePlayer, updateEnemies, updateProjectiles, updateShards, cleanup, cycleAmmo, solids, explode, activateCheckpoint, finish, shoot, damageEnemy, triggerShatter, conveyorVelocity } = sandbox.testApi;
 
 assert.equal(gameState.phase, "start");
 canvas.dispatch("mousedown", { button: 0 });
@@ -257,5 +257,69 @@ assert(freezeTarget.alive && !gameState.effects.some(effect => effect.type === "
 resetGame(); gameState.enemies[0].frozen = CONFIG.projectile.freezeDuration; triggerShatter(gameState.enemies[0]);
 resetGame();
 assert.equal(gameState.shards.length, 0, "a full restart removes prior shatter shards");
+
+function placeOnBelt(body, belt) {
+  body.x = belt.x + 20; body.y = belt.y - body.h;
+  body.vx = 0; body.vy = 0; body.grounded = true; body.supportSurface = belt;
+}
+
+resetGame();
+const [leftBelt, rightBelt] = gameState.conveyors;
+assert.equal(leftBelt.direction, -1, "the stage contains an explicit left conveyor");
+assert.equal(rightBelt.direction, 1, "the stage contains an explicit right conveyor");
+assert(solids().includes(leftBelt) && solids().includes(rightBelt), "conveyors participate in ordinary solid collision");
+placeOnBelt(gameState.player, rightBelt);
+const stillStart = gameState.player.x;
+updatePlayer(1 / 60);
+assert(gameState.player.x > stillStart, "a supported idle player is carried right");
+const withBeltStart = gameState.player.x;
+gameState.input.keys.KeyD = true; updatePlayer(1 / 60);
+assert(gameState.player.x - withBeltStart > CONFIG.conveyor.speed / 60, "player input adds to conveyor transport");
+gameState.player.vx = -CONFIG.player.maxSpeed; gameState.input.keys = { KeyA: true };
+const againstStart = gameState.player.x; updatePlayer(1 / 60);
+assert(gameState.player.x < againstStart, "the player can run against a right conveyor");
+gameState.input.keys = {}; gameState.input.jump.held = false; gameState.input.jump.pressed = true;
+const jumpStart = gameState.player.x; updatePlayer(1 / 60);
+assert(gameState.player.vy < 0 && !gameState.player.grounded, "jumping leaves conveyor support normally");
+assert.equal(conveyorVelocity(gameState.player), 0, "an airborne player receives no conveyor velocity");
+
+resetGame();
+placeOnBelt(gameState.player, leftBelt);
+const leftStart = gameState.player.x; updatePlayer(1 / 60);
+assert(gameState.player.x < leftStart, "the left conveyor carries supported players left");
+
+resetGame();
+const collisionBelt = gameState.conveyors[1];
+const stopWall = { x: collisionBelt.x + 100, y: 300, w: 30, h: 180, active: true };
+gameState.platforms.push(stopWall); placeOnBelt(gameState.player, collisionBelt);
+gameState.player.x = stopWall.x - gameState.player.w;
+for (let frame = 0; frame < 30; frame++) updatePlayer(1 / 60);
+assert.equal(gameState.player.x + gameState.player.w, stopWall.x, "conveyor transport cannot push the player through a wall");
+
+resetGame();
+const transportedEnemy = gameState.enemies[6];
+placeOnBelt(transportedEnemy, gameState.conveyors[1]);
+transportedEnemy.minX = -10000; transportedEnemy.maxX = 10000; transportedEnemy.vx = CONFIG.enemies.fireSpeed;
+const livingStart = transportedEnemy.x; updateEnemies(1 / 60);
+assert(transportedEnemy.x - livingStart > CONFIG.conveyor.speed / 60, "living enemy AI motion combines with conveyor transport");
+transportedEnemy.frozen = CONFIG.projectile.freezeDuration; transportedEnemy.vx = 0;
+const frozenStart = transportedEnemy.x; updateEnemies(1 / 60);
+assert(transportedEnemy.x > frozenStart, "a frozen enemy remains conveyor-transported while its AI is stopped");
+
+const rider = gameState.player;
+rider.x = transportedEnemy.x + 4; rider.y = transportedEnemy.y - rider.h;
+rider.vx = 0; rider.vy = 0; rider.grounded = true; rider.frozenSupport = transportedEnemy; rider.supportSurface = transportedEnemy;
+const riderOffset = rider.x - transportedEnemy.x;
+update(1 / 60);
+assert(Math.abs((rider.x - transportedEnemy.x) - riderOffset) < 0.1, "the player rides a conveyor-carried frozen enemy without update-order slip");
+assert(rider.frozenSupport === transportedEnemy && rider.grounded, "moving frozen support remains valid after transport");
+
+resetGame();
+assert(gameState.conveyors.every(belt => belt.active), "full restart restores static conveyor geometry");
+gameState.player.frozenSupport = gameState.enemies[0]; gameState.player.supportSurface = gameState.enemies[0];
+gameState.player.x = gameState.checkpoint.respawnX; gameState.player.y = CONFIG.level.killY + 1;
+gameState.player.retries = 1; updatePlayer(0);
+assert.equal(gameState.player.frozenSupport, null, "checkpoint respawn clears stale frozen support");
+assert.equal(gameState.player.supportSurface, null, "checkpoint respawn clears stale ground support");
 
 console.log("All gameplay/input assertions passed");
