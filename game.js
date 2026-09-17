@@ -10,6 +10,7 @@ const CONFIG = Object.freeze({
   conveyor: { speed: 95, contactTolerance: 2, visualStripeSpacing: 28, visualScrollSpeed: 70 },
   movableBox: { width: 46, height: 46, gravity: 1800, maxFallSpeed: 900, explosionImpulse: 520, maxHorizontalSpeed: 620, maxVerticalSpeed: 760, groundDeceleration: 620, enemyDamageMinSpeed: 230, enemyImpactDamage: 1, enemyImpactCooldown: 0.35, impactVelocityRetain: -0.18, contactTolerance: 2, maxMoveStep: 8, cleanupMargin: 160, borderWidth: 3, cornerSize: 9, flashDuration: 0.16 },
   projectile: { radius: 7, speed: 570, inherit: 0.18, lifetime: 4, damage: 1, bounceCount: 3, restitution: 0.82, explosionRadius: 105, freezeDuration: 5 },
+  normalShot: { radius: 4, speed: 650, velocityInheritance: 0.18, lifetime: 1.6, damage: 1, cooldown: 0.24 },
   shatter: { shardCount: 6, shardSpeed: 360, shardLifetime: 0.7, shardDamage: 1, shardSize: 7, flashDuration: 0.28, flashRadius: 48, flashStartScale: 0.65 },
   enemies: { width: 38, height: 34, health: 1, fireSpeed: 62, iceSpeed: 43, hopSpeed: 310, hopPeriod: 1.7, contactDamage: 1, hitTime: 0.15 },
   interactions: { frozenLandingTolerance: 8, thawWarning: 1, thawLiftSpeed: 120, wallShardRadius: 34, switchPulseSpeed: 5, collectiblePulseSpeed: 4, collectiblePulseAmount: 3 },
@@ -17,7 +18,7 @@ const CONFIG = Object.freeze({
   checkpoint: { x: 3080, y: 390, width: 28, height: 90, respawnX: 3115, respawnY: 390 },
   level: { width: 5200, floorY: 480, killY: 700, goalX: 5090, goalWidth: 58, goalHeight: 110 },
   render: { grid: 80, slopeSteps: 8, fontSmall: 14, fontMedium: 20, fontLarge: 44, overlayAlpha: 0.78, playerBlinkRate: 14, trailLength: 18, pi2: Math.PI * 2 },
-  colors: { sky: "#111b35", sky2: "#263d69", ground: "#33435f", edge: "#7488aa", player: "#f6f7fb", explosion: "#ff784f", bounce: "#72ee8b", freeze: "#62c9ff", gold: "#ffe166", danger: "#ff5577" }
+  colors: { sky: "#111b35", sky2: "#263d69", ground: "#33435f", edge: "#7488aa", player: "#f6f7fb", normal: "#e8f5ff", explosion: "#ff784f", bounce: "#72ee8b", freeze: "#62c9ff", gold: "#ffe166", danger: "#ff5577" }
 });
 
 const ASSET_IDS = Object.freeze({
@@ -311,14 +312,27 @@ function activateCheckpoint() {
   for (const type of ["explosion", "bounce", "freeze"]) if (!p.ammo.includes(type) && p.ammo.length < CONFIG.ammo.capacity) p.ammo.push(type);
   clampAmmoIndex(); addEffect("text", c.x, c.y, CONFIG.colors.gold, CONFIG.effects.messageLife, "CHECKPOINT + AMMO CACHE");
 }
+function getAimVector() {
+  const p = gameState.player;
+  const sx = p.x + p.w / 2, sy = p.y + p.h / 2;
+  const wx = gameState.input.mouse.x + gameState.camera.x, wy = gameState.input.mouse.y;
+  const angle = Math.atan2(wy - sy, wx - sx);
+  return { x: Math.cos(angle), y: Math.sin(angle) };
+}
 function shoot() {
-  const p = gameState.player; p.cooldown = CONFIG.player.shotCooldown;
-  if (!p.ammo.length) { p.emptyFlash = CONFIG.effects.defaultLife; addEffect("text", p.x, p.y, CONFIG.colors.danger, CONFIG.effects.defaultLife, "EMPTY"); return; }
-  clampAmmoIndex(); const type = p.ammo[p.selectedAmmoIndex]; if (!type) return;
-  const sx = p.x + p.w/2, sy = p.y + p.h/2, wx = gameState.input.mouse.x + gameState.camera.x, wy = gameState.input.mouse.y;
-  const angle = Math.atan2(wy - sy, wx - sx), dx = Math.cos(angle), dy = Math.sin(angle);
-  gameState.projectiles.push({ type, x: sx + dx * p.w, y: sy + dy * p.h/2, radius: CONFIG.projectile.radius, vx: dx * CONFIG.projectile.speed + p.vx * CONFIG.projectile.inherit, vy: dy * CONFIG.projectile.speed + p.vy * CONFIG.projectile.inherit, life: CONFIG.projectile.lifetime, alive: true, bounces: 0, trail: [] });
-  p.ammo.splice(p.selectedAmmoIndex, 1); clampAmmoIndex();
+  const p = gameState.player;
+  const hasSpecialAmmo = p.ammo.length > 0;
+  if (hasSpecialAmmo) clampAmmoIndex();
+  else p.selectedAmmoIndex = 0;
+  const type = hasSpecialAmmo ? p.ammo[p.selectedAmmoIndex] : "normal";
+  if (!type) return;
+  const tuning = type === "normal" ? CONFIG.normalShot : CONFIG.projectile;
+  const inheritance = type === "normal" ? tuning.velocityInheritance : tuning.inherit;
+  const direction = getAimVector();
+  const sx = p.x + p.w / 2, sy = p.y + p.h / 2;
+  gameState.projectiles.push({ type, x: sx + direction.x * p.w, y: sy + direction.y * p.h / 2, radius: tuning.radius, vx: direction.x * tuning.speed + p.vx * inheritance, vy: direction.y * tuning.speed + p.vy * inheritance, life: tuning.lifetime, alive: true, bounces: 0, trail: [] });
+  p.cooldown = type === "normal" ? CONFIG.normalShot.cooldown : CONFIG.player.shotCooldown;
+  if (hasSpecialAmmo) { p.ammo.splice(p.selectedAmmoIndex, 1); clampAmmoIndex(); }
 }
 
 function updateEnemies(dt) {
@@ -432,7 +446,7 @@ function updateProjectiles(dt) {
     if (!p.alive || !validEntity(p)) continue; p.life -= dt; p.trail.push({x:p.x,y:p.y}); if (p.trail.length > CONFIG.render.trailLength) p.trail.shift();
     p.x += p.vx*dt; p.y += p.vy*dt;
     let target = null; for (const e of gameState.enemies) if (e.alive && circleRect(p,e)) { target=e; break; }
-    if (target) { if (p.type === "explosion") explode(p); else { damageEnemy(target, p.type === "freeze" ? 0 : CONFIG.projectile.damage, p.type === "freeze"); p.alive=false; } continue; }
+    if (target) { if (p.type === "explosion") explode(p); else { damageEnemy(target, p.type === "freeze" ? 0 : p.type === "normal" ? CONFIG.normalShot.damage : CONFIG.projectile.damage, p.type === "freeze"); p.alive=false; } continue; }
     if (p.type === "bounce" && gameState.switch && !gameState.switch.active && circleRect(p,gameState.switch)) { gameState.switch.active=true; gameState.door.active=false; p.alive=false; addEffect("text", gameState.switch.x, gameState.switch.y, CONFIG.colors.bounce, CONFIG.effects.messageLife, "SHORTCUT OPEN"); continue; }
     const hit=projectileSolidHit(p); if (hit) {
       if (p.type === "explosion") explode(p);
@@ -499,10 +513,10 @@ function renderMovableBoxes() {
   }
 }
 function renderEnemies() { for(const e of gameState.enemies){ctx.save();if(e.hit>0)ctx.globalAlpha=.45;ctx.fillStyle=e.frozen>0?CONFIG.colors.freeze:e.type==="fire"?CONFIG.colors.explosion:e.type==="slime"?CONFIG.colors.bounce:"#9abfff";ctx.fillRect(e.x,e.y,e.w,e.h);ctx.strokeStyle=e.frozen>0?"#fff":"#1b2034";ctx.lineWidth=e.frozen>0?4:2;ctx.strokeRect(e.x,e.y,e.w,e.h);if(e.frozen>0){ctx.fillStyle="#dff8ff";ctx.fillRect(e.x-3,e.y-5,e.w+6,5);if(e.frozen<=CONFIG.interactions.thawWarning){ctx.globalAlpha=.45+.35*Math.sin(gameState.time*CONFIG.interactions.switchPulseSpeed);ctx.fillStyle="#fff";ctx.fillRect(e.x,e.y,e.w,e.h);}}ctx.fillStyle="#172033";ctx.fillRect(e.x+8,e.y+10,5,5);ctx.fillRect(e.x+25,e.y+10,5,5);ctx.restore();} }
-function renderProjectiles(){for(const p of gameState.projectiles){ctx.strokeStyle=ammoColor(p.type);ctx.globalAlpha=.25;ctx.beginPath();for(const t of p.trail)ctx.lineTo(t.x,t.y);ctx.stroke();ctx.globalAlpha=1;ctx.fillStyle=ammoColor(p.type);ctx.beginPath();ctx.arc(p.x,p.y,p.radius,0,CONFIG.render.pi2);ctx.fill();ctx.strokeStyle="#fff";ctx.stroke();}}
+function renderProjectiles(){for(const p of gameState.projectiles){ctx.strokeStyle=ammoColor(p.type);ctx.globalAlpha=p.type==="normal"?.14:.25;ctx.beginPath();for(const t of p.trail)ctx.lineTo(t.x,t.y);ctx.stroke();ctx.globalAlpha=1;ctx.fillStyle=ammoColor(p.type);ctx.beginPath();ctx.arc(p.x,p.y,p.radius,0,CONFIG.render.pi2);ctx.fill();if(p.type!=="normal"){ctx.strokeStyle="#fff";ctx.stroke();}}}
 function renderShards(){for(const shard of gameState.shards){ctx.save();ctx.translate(shard.x,shard.y);ctx.rotate(shard.angle);ctx.fillStyle="#dff8ff";ctx.strokeStyle=CONFIG.colors.freeze;ctx.beginPath();ctx.moveTo(CONFIG.shatter.shardSize,0);ctx.lineTo(0,CONFIG.shatter.shardSize/2);ctx.lineTo(-CONFIG.shatter.shardSize,0);ctx.lineTo(0,-CONFIG.shatter.shardSize/2);ctx.closePath();ctx.fill();ctx.stroke();ctx.restore();}}
 function renderPlayer(){const p=gameState.player;if(!p)return;const blink=p.invulnerable>0&&Math.floor(gameState.time*CONFIG.render.playerBlinkRate)%2;ctx.globalAlpha=blink?.35:1;ctx.fillStyle=p.emptyFlash>0?CONFIG.colors.danger:CONFIG.colors.player;ctx.fillRect(p.x,p.y,p.w,p.h);ctx.fillStyle="#26334e";ctx.fillRect(p.x+17,p.y+9,6,6);ctx.globalAlpha=1;
-  const mx=gameState.input.mouse.x+gameState.camera.x,my=gameState.input.mouse.y,a=Math.atan2(my-(p.y+p.h/2),mx-(p.x+p.w/2));ctx.strokeStyle="#d9efff";ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(p.x+p.w/2,p.y+p.h/2);ctx.lineTo(p.x+p.w/2+Math.cos(a)*28,p.y+p.h/2+Math.sin(a)*28);ctx.stroke();
+  const aim=getAimVector();ctx.strokeStyle="#d9efff";ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(p.x+p.w/2,p.y+p.h/2);ctx.lineTo(p.x+p.w/2+aim.x*28,p.y+p.h/2+aim.y*28);ctx.stroke();
   const facing=p.vx<0?-1:1,ordered=p.ammo.map((type,index)=>({type,index}));ordered.sort((a,b)=>(a.index===p.selectedAmmoIndex?-1:b.index===p.selectedAmmoIndex?1:a.index-b.index));
   ordered.forEach(({type,index},slot)=>{const selected=index===p.selectedAmmoIndex,r=selected?8:5,x=p.x+p.w/2-facing*(CONFIG.ammo.followerSpacing*(slot+1)),y=p.y+p.h/2-CONFIG.ammo.followerLift+slot*2;ctx.fillStyle=ammoColor(type);ctx.beginPath();ctx.arc(x,y,r,0,CONFIG.render.pi2);ctx.fill();if(selected){ctx.strokeStyle="#fff";ctx.lineWidth=2;ctx.stroke();}});}
 function renderEffects(){for(const e of gameState.effects){const alpha=Math.max(0,e.life/e.maxLife);ctx.globalAlpha=alpha;if(e.type==="explosion"||e.type==="shatter"){ctx.fillStyle=e.color;ctx.beginPath();ctx.arc(e.x,e.y,e.type==="shatter"?CONFIG.shatter.flashRadius*(1-alpha*(1-CONFIG.shatter.flashStartScale)):CONFIG.projectile.explosionRadius*(1-alpha*.4),0,CONFIG.render.pi2);ctx.fill();}else if(e.type==="burst"||e.type==="destruction"){ctx.strokeStyle=e.color;ctx.lineWidth=5;const radius=(e.type==="destruction"?CONFIG.interactions.wallShardRadius:30)*(1-alpha);ctx.beginPath();ctx.arc(e.x,e.y,radius,0,CONFIG.render.pi2);ctx.stroke();if(e.type==="destruction"){for(let i=0;i<CONFIG.effects.particleCount;i++){const a=i*CONFIG.render.pi2/CONFIG.effects.particleCount;ctx.fillRect(e.x+Math.cos(a)*radius-2,e.y+Math.sin(a)*radius-2,4,4);}}}else{ctx.fillStyle=e.color;ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(e.text,e.x,e.y);}ctx.globalAlpha=1;}}

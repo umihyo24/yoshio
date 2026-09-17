@@ -51,6 +51,49 @@ gameState.input.mouse.y = gameState.player.y;
 shoot();
 assert.deepEqual(Array.from(gameState.player.ammo), ["bounce", "freeze"], "shooting consumes the selected explosion and leaves a valid inventory");
 assert.equal(gameState.player.selectedAmmoIndex, 0);
+
+resetGame();
+gameState.player.ammo = [];
+gameState.player.selectedAmmoIndex = 99;
+gameState.input.mouse.x = gameState.player.x + 200;
+gameState.input.mouse.y = gameState.player.y + gameState.player.h / 2;
+shoot();
+assert.equal(gameState.projectiles.length, 1, "an empty special-ammo inventory fires a fallback projectile");
+const normalShot = gameState.projectiles[0];
+assert.equal(normalShot.type, "normal", "the fallback uses the shared projectile architecture");
+assert.equal(normalShot.radius, CONFIG.normalShot.radius);
+assert.equal(normalShot.life, CONFIG.normalShot.lifetime);
+assert(normalShot.vx > 0 && Math.abs(normalShot.vy) < CONFIG.physics.epsilon, "Normal Shot uses the authoritative 360-degree aim vector");
+assert.equal(gameState.player.ammo.length, 0, "Normal Shot is unlimited and never enters special-ammo inventory");
+assert.equal(gameState.player.selectedAmmoIndex, 0, "empty-inventory firing repairs the selected index");
+assert.equal(gameState.player.cooldown, CONFIG.normalShot.cooldown, "Normal Shot uses its configured shared firing cooldown state");
+cycleAmmo(1); cycleAmmo(-1);
+assert.equal(gameState.player.selectedAmmoIndex, 0, "wheel selection remains safe while empty");
+assert.equal(gameState.player.ammo.length, 0);
+
+gameState.projectiles = [];
+const recoveryEnemy = gameState.enemies[2];
+recoveryEnemy.x = gameState.player.x + 90; recoveryEnemy.y = gameState.player.y;
+recoveryEnemy.hp = CONFIG.normalShot.damage * 2; recoveryEnemy.vx = 0;
+shoot(); updateProjectiles(0.1); cleanup();
+assert.equal(recoveryEnemy.hp, CONFIG.normalShot.damage, "Normal Shot deals configured damage through shared enemy damage");
+assert.equal(recoveryEnemy.alive, true);
+gameState.player.cooldown = 0; shoot(); updateProjectiles(0.1); cleanup();
+assert.equal(recoveryEnemy.alive, false, "Normal Shot can defeat an ordinary enemy");
+assert.equal(recoveryEnemy.dropGranted, true, "Normal Shot defeat runs one-time shared reward handling");
+assert.deepEqual(Array.from(gameState.player.ammo), ["freeze"], "the defeated enemy grants its existing special ammo");
+gameState.projectiles = []; gameState.player.cooldown = 0; shoot();
+assert.equal(gameState.projectiles[0].type, "freeze", "newly acquired special ammo automatically takes priority over Normal Shot");
+assert.equal(gameState.player.ammo.length, 0, "the recovered special ammo keeps its existing consumption rule");
+gameState.projectiles = []; gameState.player.cooldown = 0; shoot();
+assert.equal(gameState.projectiles[0].type, "normal", "firing automatically returns to Normal Shot after the last special is consumed");
+
+resetGame();
+gameState.player.ammo = ["bounce", "freeze"];
+gameState.player.selectedAmmoIndex = 1;
+shoot();
+assert.equal(gameState.projectiles[0].type, "freeze", "selected special ammo has priority when multiple items are stored");
+assert.deepEqual(Array.from(gameState.player.ammo), ["bounce"]);
 resetGame();
 damageEnemy(gameState.enemies[0], CONFIG.enemies.health);
 damageEnemy(gameState.enemies[1], CONFIG.enemies.health);
@@ -175,6 +218,10 @@ resetGame();
 gameState.projectiles.push({ type: "freeze", x: gameState.wall.x - 8, y: gameState.wall.y + 30, radius: CONFIG.projectile.radius, vx: 500, vy: 0, life: 1, alive: true, bounces: 0, trail: [] });
 updateProjectiles(1 / 30);
 assert.equal(gameState.wall.active, true, "a non-explosion projectile cannot destroy the wall");
+gameState.projectiles = [{ type: "normal", x: gameState.wall.x - 8, y: gameState.wall.y + 30, radius: CONFIG.normalShot.radius, vx: CONFIG.normalShot.speed, vy: 0, life: CONFIG.normalShot.lifetime, alive: true, bounces: 0, trail: [] }];
+updateProjectiles(1 / 30);
+assert.equal(gameState.wall.active, true, "Normal Shot is blocked without destroying a destructible wall");
+assert.equal(gameState.projectiles[0].alive, false);
 
 resetGame();
 const switchEffectCount = gameState.effects.length;
@@ -186,6 +233,11 @@ const activatedEffectCount = gameState.effects.length;
 updateProjectiles(0);
 assert.equal(gameState.effects.length, activatedEffectCount, "the switch side effect runs only once");
 assert(activatedEffectCount > switchEffectCount);
+
+resetGame();
+gameState.projectiles.push({ type: "normal", x: gameState.switch.x + gameState.switch.w / 2, y: gameState.switch.y + gameState.switch.h / 2, radius: CONFIG.normalShot.radius, vx: 0, vy: 0, life: 1, alive: true, bounces: 0, trail: [] });
+updateProjectiles(0);
+assert.equal(gameState.switch.active, false, "Normal Shot cannot activate a Bounce-specific switch");
 
 resetGame();
 const platformEnemy = gameState.enemies[2];
@@ -238,6 +290,13 @@ assert.equal(gameState.player.ammo.length, 1, "a repeated shatter attempt cannot
 for (let elapsed = 0; elapsed < CONFIG.shatter.shardLifetime; elapsed += 1 / 120) updateShards(1 / 120);
 assert.equal(shardTarget.alive, false, "a traveling shard damages another living enemy");
 assert.equal(gameState.effects.filter(effect => effect.type === "shatter").length, 1, "a shard hitting a frozen target does not recursively shatter it");
+
+resetGame();
+const normalFrozenTarget = gameState.enemies[0]; normalFrozenTarget.frozen = CONFIG.projectile.freezeDuration;
+gameState.projectiles.push({ type: "normal", x: normalFrozenTarget.x + normalFrozenTarget.w / 2, y: normalFrozenTarget.y + normalFrozenTarget.h / 2, radius: CONFIG.normalShot.radius, vx: 0, vy: 0, life: 1, alive: true, bounces: 0, trail: [] });
+updateProjectiles(0);
+assert.equal(normalFrozenTarget.alive, false, "Normal Shot applies ordinary direct damage to a frozen enemy");
+assert(!gameState.effects.some(effect => effect.type === "shatter"), "Normal Shot never triggers Shatter");
 
 resetGame();
 const ordinaryTarget = gameState.enemies[0];
@@ -395,6 +454,11 @@ assert.equal(impactEnemy.alive, false, "a later meaningful impact can defeat the
 assert.equal(impactEnemy.dropGranted, true, "box defeat grants the normal drop exactly once");
 
 box = isolatedBox();
+gameState.projectiles.push({ type: "normal", x: box.x - 5, y: box.y + box.h / 2, radius: CONFIG.normalShot.radius, vx: CONFIG.normalShot.speed, vy: 0, life: CONFIG.normalShot.lifetime, alive: true, bounces: 0, trail: [] });
+updateProjectiles(1 / 60);
+assert.equal(gameState.projectiles[0].alive, false, "Normal Shot disappears on movable-box collision");
+assert.equal(box.vx, 0, "Normal Shot gives a movable box no impulse");
+gameState.projectiles = [];
 gameState.projectiles.push({ type: "bounce", x: box.x - 5, y: box.y + box.h / 2, radius: CONFIG.projectile.radius, vx: 500, vy: 0, life: 1, alive: true, bounces: 0, trail: [] });
 updateProjectiles(1 / 60); assert(gameState.projectiles[0].vx < 0 && box.vx === 0, "Bounce reflects from a box without launching it");
 gameState.projectiles = [{ type: "freeze", x: box.x - 5, y: box.y + box.h / 2, radius: CONFIG.projectile.radius, vx: 500, vy: 0, life: 1, alive: true, bounces: 0, trail: [] }];
@@ -411,5 +475,25 @@ assert.equal(gameState.player.boxSupport, null, "checkpoint respawn keeps box su
 resetGame(); assert.equal(gameState.movableBoxes.length, 1, "a full restart restores level-defined boxes");
 gameState.movableBoxes[0].active = false; cleanup(); gameState.player.x = gameState.goal.x; gameState.player.y = gameState.goal.y; updatePlayer(0);
 assert.equal(gameState.result, "win", "losing the optional box cannot block normal level completion");
+
+resetGame();
+gameState.player.ammo = [];
+gameState.input.mouse.x = CONFIG.canvas.width;
+gameState.input.mouse.y = gameState.player.y;
+for (let shot = 0; shot < 80; shot++) { gameState.player.cooldown = 0; shoot(); }
+assert.equal(gameState.projectiles.length, 80, "repeated fallback firing uses the common projectile collection");
+for (let elapsed = 0; elapsed < CONFIG.normalShot.lifetime + 0.1; elapsed += 1 / 60) { updateProjectiles(1 / 60); cleanup(); }
+assert.equal(gameState.projectiles.length, 0, "repeated Normal Shots expire and are cleaned up without accumulation");
+
+resetGame();
+gameState.player.ammo = [];
+activateCheckpoint();
+assert.deepEqual(Array.from(gameState.player.ammo), ["explosion", "bounce", "freeze"], "empty-inventory checkpoint recovery keeps the existing special-ammo cache behavior");
+gameState.player.ammo = []; gameState.player.selectedAmmoIndex = 0; gameState.player.retries = 1; gameState.player.y = CONFIG.level.killY + 1;
+updatePlayer(0);
+assert.equal(gameState.player.ammo.length, 0, "checkpoint respawn does not add Normal Shot to inventory");
+assert.equal(gameState.player.selectedAmmoIndex, 0, "checkpoint respawn preserves the safe empty-inventory selection value");
+finish("lose"); windowStub.dispatch("keydown", { code: "KeyR" });
+assert.deepEqual(Array.from(gameState.player.ammo), ["explosion", "bounce", "freeze"], "full restart still restores only configured starting special ammo");
 
 console.log("All gameplay/input assertions passed");
