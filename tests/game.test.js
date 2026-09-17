@@ -65,11 +65,14 @@ assert(player.isWallSliding, "falling wall contact starts a wall slide");
 assert(player.vy <= CONFIG.player.wallSlideMaxFallSpeed, "wall slide caps fall speed");
 canvas.dispatch("mousedown", { button: 2 }); updateInput(1 / 60); updatePlayer(1 / 60);
 assert(player.vx < 0 && player.vy < 0, "right-wall jump launches up-left");
+assert(CONFIG.player.wallJumpVerticalSpeed > CONFIG.player.wallJumpHorizontalSpeed * 3, "wall jump is primarily vertical");
 assert.equal(player.wallJumpBlockedSide, "right");
 const launchVelocity = player.vx;
 gameState.input.keys.KeyD = true; gameState.input.pressed = {};
 updateInput(1 / 60); updatePlayer(1 / 60);
-assert.equal(player.vx, launchVelocity, "control lock preserves the launch impulse");
+updateInput(1 / 60); updatePlayer(1 / 60);
+updateInput(1 / 60); updatePlayer(1 / 60);
+assert(player.vx > launchVelocity, "toward-wall air control quickly overcomes the brief launch lock");
 
 resetGame();
 const leftWallPlayer = gameState.player;
@@ -105,5 +108,33 @@ assert.equal(gameState.phase, "gameover");
 assert.equal(gameState.input.mouse.down, false); assert.equal(gameState.input.mouse.jumpDown, false, "phase changes clear held mouse input");
 windowStub.dispatch("keydown", { code: "KeyR" });
 assert.equal(gameState.phase, "playing", "R restarts after game over");
+
+function heldWallClimb(side) {
+  resetGame();
+  const p = gameState.player;
+  const wall = side === "right"
+    ? { x: 3000, y: -1200, w: 40, h: 1680, active: true }
+    : { x: 2900, y: -1200, w: 40, h: 1680, active: true };
+  gameState.platforms.push(wall);
+  p.x = side === "right" ? wall.x - p.w : wall.x + wall.w;
+  p.y = 350; p.vx = 0; p.vy = 80; p.grounded = false;
+  gameState.input.keys[side === "right" ? "KeyD" : "KeyA"] = true;
+  gameState.input.mouse.jumpDown = true;
+  gameState.input.jump.held = false;
+  gameState.input.pressed = { MouseJump: true };
+  let launches = 0;
+  let wasBlocked = false;
+  for (let frame = 0; frame < 240; frame++) {
+    updateInput(1 / 120); updatePlayer(1 / 120);
+    const blocked = p.wallJumpBlockedSide === side;
+    if (blocked && !wasBlocked) launches++;
+    wasBlocked = blocked;
+    gameState.input.pressed = {};
+  }
+  assert(launches >= 3, `held jump repeatedly climbs the ${side} wall after detach/re-contact`);
+  assert(p.y < 300, `repeated ${side}-wall jumps gain height`);
+}
+heldWallClimb("right");
+heldWallClimb("left");
 
 console.log("All gameplay/input assertions passed");
