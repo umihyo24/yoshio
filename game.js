@@ -9,7 +9,8 @@ const CONFIG = Object.freeze({
   ammo: { types: Object.freeze(["explosion", "bounce", "freeze"]), capacity: 5, orbitRadius: 35, orbitSpeed: 1.8 },
   projectile: { radius: 7, speed: 570, inherit: 0.18, lifetime: 4, damage: 1, bounceCount: 3, restitution: 0.82, explosionRadius: 105, freezeDuration: 5 },
   enemies: { width: 38, height: 34, health: 1, fireSpeed: 62, iceSpeed: 43, hopSpeed: 310, hopPeriod: 1.7, contactDamage: 1, hitTime: 0.15 },
-  effects: { defaultLife: 0.65, explosionLife: 0.38, messageLife: 1.5, particleCount: 10 },
+  interactions: { frozenLandingTolerance: 8, thawWarning: 1, thawLiftSpeed: 120, wallShardRadius: 34, switchPulseSpeed: 5, collectiblePulseSpeed: 4, collectiblePulseAmount: 3 },
+  effects: { defaultLife: 0.65, explosionLife: 0.38, destructionLife: 0.7, messageLife: 1.5, particleCount: 10 },
   checkpoint: { x: 3080, y: 390, width: 28, height: 90, respawnX: 3115, respawnY: 390 },
   level: { width: 5200, floorY: 480, killY: 700, goalX: 5090, goalWidth: 58, goalHeight: 110 },
   render: { grid: 80, slopeSteps: 8, fontSmall: 14, fontMedium: 20, fontLarge: 44, overlayAlpha: 0.78, playerBlinkRate: 14, trailLength: 18, pi2: Math.PI * 2 },
@@ -105,7 +106,7 @@ function grantAmmo(enemy) {
 }
 function damageEnemy(enemy, amount, freeze = false) {
   if (!enemy?.alive) return; enemy.hp -= amount; enemy.hit = CONFIG.enemies.hitTime;
-  if (freeze && enemy.hp > 0) enemy.frozen = CONFIG.projectile.freezeDuration;
+  if (freeze && enemy.hp > 0) { enemy.frozen = CONFIG.projectile.freezeDuration; enemy.vx = 0; enemy.vy = 0; }
   if (enemy.hp <= 0) { enemy.alive = false; grantAmmo(enemy); addEffect("burst", enemy.x + enemy.w/2, enemy.y + enemy.h/2, ammoColor({fire:"explosion",slime:"bounce",ice:"freeze"}[enemy.type])); }
 }
 function ammoColor(type) { return CONFIG.colors[type] || CONFIG.colors.gold; }
@@ -138,7 +139,8 @@ function updateInput(dt) {
 function detectWallContact(body) {
   const tolerance = CONFIG.player.wallContactTolerance;
   const contact = { left: false, right: false };
-  for (const solid of solids(true)) {
+  // Frozen enemies are one-way landing surfaces, never sticky wall-jump walls.
+  for (const solid of solids(false)) {
     const verticalOverlap = body.y + body.h > solid.y + tolerance && body.y < solid.y + solid.h - tolerance;
     if (!verticalOverlap) continue;
     if (Math.abs(body.x - (solid.x + solid.w)) <= tolerance) contact.left = true;
@@ -184,7 +186,9 @@ function updatePlayer(dt) {
   }
   if (!i.jump.held && p.vy < 0) p.vy *= Math.pow(CONFIG.player.jumpCut, dt);
   p.vy = Math.min(CONFIG.physics.maxFall, p.vy + CONFIG.physics.gravity * dt);
-  resolveBody(p, dt, true);
+  const previousBottom = p.y + p.h;
+  resolveBody(p, dt, false);
+  resolveFrozenEnemyPlatforms(p, previousBottom);
   p.wallContact = detectWallContact(p);
   p.isWallSliding = !p.grounded && (p.wallContact.left || p.wallContact.right) && p.vy >= 0;
   if (p.isWallSliding) p.vy = Math.min(p.vy, CONFIG.player.wallSlideMaxFallSpeed);
@@ -199,6 +203,18 @@ function updatePlayer(dt) {
   if (!gameState.checkpoint.active && overlap(p, gameState.checkpoint)) activateCheckpoint();
   if (!gameState.collectible.collected && circleRect(gameState.collectible, p)) { gameState.collectible.collected = true; addEffect("text", p.x, p.y, CONFIG.colors.gold, CONFIG.effects.messageLife, "SECRET CORE!"); }
   if (overlap(p, gameState.goal)) finish("win");
+}
+function resolveFrozenEnemyPlatforms(player, previousBottom) {
+  player.frozenSupport = null;
+  if (player.vy < 0) return;
+  let landing = null;
+  for (const enemy of gameState.enemies) {
+    if (!enemy.alive || enemy.frozen <= 0) continue;
+    const horizontal = player.x + player.w > enemy.x && player.x < enemy.x + enemy.w;
+    const crossedTop = previousBottom <= enemy.y + CONFIG.interactions.frozenLandingTolerance && player.y + player.h >= enemy.y;
+    if (horizontal && crossedTop && (!landing || enemy.y < landing.y)) landing = enemy;
+  }
+  if (landing) { player.y = landing.y - player.h; player.vy = 0; player.grounded = true; player.frozenSupport = landing; }
 }
 function damagePlayer(amount, direction) {
   const p = gameState.player; if (!p || p.invulnerable > 0) return;
@@ -228,8 +244,15 @@ function shoot() {
 
 function updateEnemies(dt) {
   for (const e of gameState.enemies) {
-    if (!e.alive || !validEntity(e)) continue; e.hit = Math.max(0, e.hit - dt); e.frozen = Math.max(0, e.frozen - dt);
+    if (!e.alive || !validEntity(e)) continue;
+    const wasFrozen = e.frozen > 0;
+    e.hit = Math.max(0, e.hit - dt); e.frozen = Math.max(0, e.frozen - dt);
     if (e.frozen > 0) { e.vx = 0; e.vy = 0; continue; }
+    if (wasFrozen) {
+      const p = gameState.player;
+      if (p?.frozenSupport === e) { p.y = Math.min(p.y, e.y - p.h); p.vy = -CONFIG.interactions.thawLiftSpeed; p.grounded = false; p.frozenSupport = null; }
+      addEffect("burst", e.x + e.w/2, e.y, CONFIG.colors.freeze, CONFIG.effects.defaultLife);
+    }
     if (e.type === "slime") { e.hopClock += dt; if (e.grounded && e.hopClock >= CONFIG.enemies.hopPeriod) { e.vy = -CONFIG.enemies.hopSpeed; e.vx = e.x < (e.minX+e.maxX)/2 ? CONFIG.enemies.fireSpeed : -CONFIG.enemies.fireSpeed; e.hopClock = 0; } }
     else { const speed = e.type === "ice" ? CONFIG.enemies.iceSpeed : CONFIG.enemies.fireSpeed; if (!e.vx) e.vx = speed; if (e.x <= e.minX) e.vx = speed; if (e.x + e.w >= e.maxX) e.vx = -speed; }
     e.vy = Math.min(CONFIG.physics.maxFall, e.vy + CONFIG.physics.gravity * dt); resolveBody(e, dt, false);
@@ -244,7 +267,12 @@ function projectileSolidHit(p) {
 function explode(p) {
   p.alive = false; const hit = new Set();
   for (const e of gameState.enemies) if (e.alive) { const dx=e.x+e.w/2-p.x, dy=e.y+e.h/2-p.y; if (dx*dx+dy*dy <= CONFIG.projectile.explosionRadius**2 && !hit.has(e)) { hit.add(e); damageEnemy(e, CONFIG.projectile.damage); } }
-  if (gameState.wall?.active) { const cx=gameState.wall.x+gameState.wall.w/2, cy=gameState.wall.y+gameState.wall.h/2; if ((cx-p.x)**2+(cy-p.y)**2 <= CONFIG.projectile.explosionRadius**2) { gameState.wall.active=false; addEffect("text", cx, cy, CONFIG.colors.explosion, CONFIG.effects.messageLife, "WALL DESTROYED"); } }
+  if (gameState.wall?.active && circleRect({ x:p.x, y:p.y, radius:CONFIG.projectile.explosionRadius }, gameState.wall)) {
+    const cx=gameState.wall.x+gameState.wall.w/2, cy=gameState.wall.y+gameState.wall.h/2;
+    gameState.wall.active=false;
+    addEffect("destruction", cx, cy, CONFIG.colors.explosion, CONFIG.effects.destructionLife);
+    addEffect("text", cx, cy, CONFIG.colors.explosion, CONFIG.effects.messageLife, "WALL DESTROYED");
+  }
   const pl=gameState.player, dx=pl.x+pl.w/2-p.x, dy=pl.y+pl.h/2-p.y, d=Math.hypot(dx,dy);
   if (d < CONFIG.projectile.explosionRadius && d > CONFIG.physics.epsilon) { const force=CONFIG.player.knockback*(1-d/CONFIG.projectile.explosionRadius); pl.vx += dx/d*force; pl.vy += dy/d*force; }
   addEffect("explosion", p.x, p.y, CONFIG.colors.explosion, CONFIG.effects.explosionLife);
@@ -280,18 +308,20 @@ function drawBackground() {
 function renderLevel() {
   for (const p of gameState.platforms) drawWorldRect(p, p.kind === "platform" ? "#526a8d" : CONFIG.colors.ground);
   for (const s of gameState.slopes) { ctx.fillStyle=CONFIG.colors.ground; ctx.beginPath(); ctx.moveTo(s.x,s.y);ctx.lineTo(s.x+s.w,s.y-s.h);ctx.lineTo(s.x+s.w,s.y);ctx.closePath();ctx.fill();ctx.strokeStyle=CONFIG.colors.edge;ctx.stroke(); }
-  drawWorldRect(gameState.wall,"#a45345",CONFIG.colors.explosion); drawWorldRect(gameState.door,"#7858a6",CONFIG.colors.bounce);
-  const sw=gameState.switch; ctx.fillStyle=sw.active?CONFIG.colors.bounce:"#8d6cae";ctx.fillRect(sw.x,sw.y,sw.w,sw.h);ctx.strokeStyle="#fff";ctx.strokeRect(sw.x,sw.y,sw.w,sw.h);
+  drawWorldRect(gameState.wall,"#a45345",CONFIG.colors.explosion);
+  if(gameState.wall?.active){ctx.strokeStyle="#ffd0bf";ctx.beginPath();ctx.moveTo(gameState.wall.x+5,gameState.wall.y+12);ctx.lineTo(gameState.wall.x+26,gameState.wall.y+45);ctx.lineTo(gameState.wall.x+10,gameState.wall.y+78);ctx.lineTo(gameState.wall.x+34,gameState.wall.y+112);ctx.stroke();}
+  if(gameState.door?.active)drawWorldRect(gameState.door,"#7858a6",CONFIG.colors.bounce);else if(gameState.door){ctx.save();ctx.globalAlpha=.35;ctx.strokeStyle=CONFIG.colors.bounce;ctx.setLineDash([8,8]);ctx.strokeRect(gameState.door.x,gameState.door.y,gameState.door.w,gameState.door.h);ctx.restore();}
+  const sw=gameState.switch;if(sw){const pulse=sw.active?Math.sin(gameState.time*CONFIG.interactions.switchPulseSpeed)*2:0;ctx.fillStyle=sw.active?CONFIG.colors.bounce:"#8d6cae";ctx.fillRect(sw.x-pulse,sw.y-pulse,sw.w+pulse*2,sw.h+pulse*2);ctx.strokeStyle="#fff";ctx.strokeRect(sw.x,sw.y,sw.w,sw.h);}
   const c=gameState.checkpoint; ctx.fillStyle=c.active?CONFIG.colors.gold:"#66718a";ctx.fillRect(c.x,c.y,c.width,c.height);ctx.fillStyle=c.active?"#fff3a5":"#9da8bf";ctx.beginPath();ctx.moveTo(c.x+c.width,c.y);ctx.lineTo(c.x+c.width+38,c.y+16);ctx.lineTo(c.x+c.width,c.y+32);ctx.fill();
   const g=gameState.goal;ctx.fillStyle="#8bf7d0";ctx.fillRect(g.x,g.y,g.w,g.h);ctx.fillStyle="#132b35";ctx.fillRect(g.x+10,g.y+15,g.w-20,g.h-15);ctx.fillStyle="#8bf7d0";ctx.font=`${CONFIG.render.fontSmall}px sans-serif`;ctx.fillText("GOAL",g.x+7,g.y-8);
-  if(!gameState.collectible.collected){const o=gameState.collectible;ctx.fillStyle=CONFIG.colors.gold;ctx.beginPath();ctx.arc(o.x,o.y,o.radius,0,CONFIG.render.pi2);ctx.fill();ctx.strokeStyle="#fff";ctx.stroke();}
+  if(!gameState.collectible.collected){const o=gameState.collectible,pulse=Math.sin(gameState.time*CONFIG.interactions.collectiblePulseSpeed)*CONFIG.interactions.collectiblePulseAmount;ctx.fillStyle=CONFIG.colors.gold;ctx.beginPath();ctx.arc(o.x,o.y,o.radius+pulse,0,CONFIG.render.pi2);ctx.fill();ctx.strokeStyle="#fff";ctx.stroke();}
 }
-function renderEnemies() { for(const e of gameState.enemies){ctx.save();if(e.hit>0)ctx.globalAlpha=.45;ctx.fillStyle=e.frozen>0?CONFIG.colors.freeze:e.type==="fire"?CONFIG.colors.explosion:e.type==="slime"?CONFIG.colors.bounce:"#9abfff";ctx.fillRect(e.x,e.y,e.w,e.h);ctx.strokeStyle=e.frozen>0?"#fff":"#1b2034";ctx.lineWidth=e.frozen>0?4:2;ctx.strokeRect(e.x,e.y,e.w,e.h);ctx.fillStyle="#172033";ctx.fillRect(e.x+8,e.y+10,5,5);ctx.fillRect(e.x+25,e.y+10,5,5);ctx.restore();} }
+function renderEnemies() { for(const e of gameState.enemies){ctx.save();if(e.hit>0)ctx.globalAlpha=.45;ctx.fillStyle=e.frozen>0?CONFIG.colors.freeze:e.type==="fire"?CONFIG.colors.explosion:e.type==="slime"?CONFIG.colors.bounce:"#9abfff";ctx.fillRect(e.x,e.y,e.w,e.h);ctx.strokeStyle=e.frozen>0?"#fff":"#1b2034";ctx.lineWidth=e.frozen>0?4:2;ctx.strokeRect(e.x,e.y,e.w,e.h);if(e.frozen>0){ctx.fillStyle="#dff8ff";ctx.fillRect(e.x-3,e.y-5,e.w+6,5);if(e.frozen<=CONFIG.interactions.thawWarning){ctx.globalAlpha=.45+.35*Math.sin(gameState.time*CONFIG.interactions.switchPulseSpeed);ctx.fillStyle="#fff";ctx.fillRect(e.x,e.y,e.w,e.h);}}ctx.fillStyle="#172033";ctx.fillRect(e.x+8,e.y+10,5,5);ctx.fillRect(e.x+25,e.y+10,5,5);ctx.restore();} }
 function renderProjectiles(){for(const p of gameState.projectiles){ctx.strokeStyle=ammoColor(p.type);ctx.globalAlpha=.25;ctx.beginPath();for(const t of p.trail)ctx.lineTo(t.x,t.y);ctx.stroke();ctx.globalAlpha=1;ctx.fillStyle=ammoColor(p.type);ctx.beginPath();ctx.arc(p.x,p.y,p.radius,0,CONFIG.render.pi2);ctx.fill();ctx.strokeStyle="#fff";ctx.stroke();}}
 function renderPlayer(){const p=gameState.player;if(!p)return;const blink=p.invulnerable>0&&Math.floor(gameState.time*CONFIG.render.playerBlinkRate)%2;ctx.globalAlpha=blink?.35:1;ctx.fillStyle=p.emptyFlash>0?CONFIG.colors.danger:CONFIG.colors.player;ctx.fillRect(p.x,p.y,p.w,p.h);ctx.fillStyle="#26334e";ctx.fillRect(p.x+17,p.y+9,6,6);ctx.globalAlpha=1;
   const mx=gameState.input.mouse.x+gameState.camera.x,my=gameState.input.mouse.y,a=Math.atan2(my-(p.y+p.h/2),mx-(p.x+p.w/2));ctx.strokeStyle="#d9efff";ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(p.x+p.w/2,p.y+p.h/2);ctx.lineTo(p.x+p.w/2+Math.cos(a)*28,p.y+p.h/2+Math.sin(a)*28);ctx.stroke();
   p.ammo.forEach((type,index)=>{const ang=gameState.time*CONFIG.ammo.orbitSpeed+index*CONFIG.render.pi2/p.ammo.length,selected=index===p.selectedAmmoIndex,r=selected?8:5;ctx.fillStyle=ammoColor(type);ctx.beginPath();ctx.arc(p.x+p.w/2+Math.cos(ang)*CONFIG.ammo.orbitRadius,p.y+p.h/2+Math.sin(ang)*CONFIG.ammo.orbitRadius,r,0,CONFIG.render.pi2);ctx.fill();if(selected){ctx.strokeStyle="#fff";ctx.lineWidth=2;ctx.stroke();}});}
-function renderEffects(){for(const e of gameState.effects){const alpha=Math.max(0,e.life/e.maxLife);ctx.globalAlpha=alpha;if(e.type==="explosion"){ctx.fillStyle=e.color;ctx.beginPath();ctx.arc(e.x,e.y,CONFIG.projectile.explosionRadius*(1-alpha*.4),0,CONFIG.render.pi2);ctx.fill();}else if(e.type==="burst"){ctx.strokeStyle=e.color;ctx.lineWidth=5;ctx.beginPath();ctx.arc(e.x,e.y,30*(1-alpha),0,CONFIG.render.pi2);ctx.stroke();}else{ctx.fillStyle=e.color;ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(e.text,e.x,e.y);}ctx.globalAlpha=1;}}
+function renderEffects(){for(const e of gameState.effects){const alpha=Math.max(0,e.life/e.maxLife);ctx.globalAlpha=alpha;if(e.type==="explosion"){ctx.fillStyle=e.color;ctx.beginPath();ctx.arc(e.x,e.y,CONFIG.projectile.explosionRadius*(1-alpha*.4),0,CONFIG.render.pi2);ctx.fill();}else if(e.type==="burst"||e.type==="destruction"){ctx.strokeStyle=e.color;ctx.lineWidth=5;const radius=(e.type==="destruction"?CONFIG.interactions.wallShardRadius:30)*(1-alpha);ctx.beginPath();ctx.arc(e.x,e.y,radius,0,CONFIG.render.pi2);ctx.stroke();if(e.type==="destruction"){for(let i=0;i<CONFIG.effects.particleCount;i++){const a=i*CONFIG.render.pi2/CONFIG.effects.particleCount;ctx.fillRect(e.x+Math.cos(a)*radius-2,e.y+Math.sin(a)*radius-2,4,4);}}}else{ctx.fillStyle=e.color;ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(e.text,e.x,e.y);}ctx.globalAlpha=1;}}
 function renderHud(){const p=gameState.player;ctx.fillStyle="#08101fdd";ctx.fillRect(16,16,470,74);ctx.fillStyle="#fff";ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(`HP ${"♥".repeat(Math.max(0,p.health))}   RETRIES ${p.retries}`,30,44);ctx.font=`${CONFIG.render.fontSmall}px sans-serif`;ctx.fillText("AMMO",30,72);if(!p.ammo.length){ctx.fillStyle="#8995ac";ctx.fillText("EMPTY — defeat enemies",92,72);}p.ammo.forEach((type,i)=>{const x=92+i*72;ctx.fillStyle=ammoColor(type);ctx.fillRect(x,58,14,14);ctx.fillStyle="#fff";ctx.fillText(type[0].toUpperCase(),x+20,71);if(i===p.selectedAmmoIndex)ctx.strokeRect(x-4,54,62,22);});ctx.fillStyle=gameState.collectible.collected?CONFIG.colors.gold:"#8995ac";ctx.fillText(`SECRET ${gameState.collectible.collected?"✓":"○"}`,385,71);}
 function overlay(title, lines, footer, color="#fff"){ctx.fillStyle=`rgba(5,9,20,${CONFIG.render.overlayAlpha})`;ctx.fillRect(0,0,CONFIG.canvas.width,CONFIG.canvas.height);ctx.textAlign="center";ctx.fillStyle=color;ctx.font=`900 ${CONFIG.render.fontLarge}px sans-serif`;ctx.fillText(title,CONFIG.canvas.width/2,145);ctx.font=`${CONFIG.render.fontMedium}px sans-serif`;lines.forEach((line,i)=>ctx.fillText(line,CONFIG.canvas.width/2,215+i*34));ctx.fillStyle=CONFIG.colors.gold;ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(footer,CONFIG.canvas.width/2,410);ctx.textAlign="left";}
 function render(){drawBackground();if(gameState.phase!=="start"&&gameState.player){ctx.save();ctx.translate(-gameState.camera.x,0);renderLevel();renderEnemies();renderProjectiles();renderPlayer();renderEffects();ctx.restore();renderHud();}if(gameState.phase==="start")overlay("ELEMENT RUN",["敵を倒して属性弾を獲得。順番を選び、道を切り拓こう。","A / D: 移動    マウス: 照準    左クリック: 発射","右クリック / Space: ジャンプ    ホイール: 弾薬切替"],"左クリック または Enter でスタート",CONFIG.colors.freeze);else if(gameState.phase==="gameover")overlay(gameState.result==="win"?"COURSE CLEAR!":"RUN OVER",[gameState.result==="win"?`秘密のコア: ${gameState.collectible.collected?"獲得!":"未獲得"}`:"リトライを使い切りました",gameState.result==="win"?"全ゾーンを走破しました。":"もう一度コースに挑戦しよう。"],"R または Enter で最初から",gameState.result==="win"?CONFIG.colors.gold:CONFIG.colors.danger);}

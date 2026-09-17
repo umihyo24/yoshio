@@ -23,8 +23,8 @@ const windowStub = new EventTargetStub();
 const sandbox = { console, Math, Object, Boolean, Number, Set, document: { getElementById: () => canvas }, window: windowStub, requestAnimationFrame: noop };
 vm.createContext(sandbox);
 const gameSource = fs.readFileSync(path.join(__dirname, "..", "game.js"), "utf8");
-vm.runInContext(`${gameSource}\n;globalThis.testApi={CONFIG,gameState,createStartingAmmo,resetGame,update,updateInput,updatePlayer,cycleAmmo,solids,explode,activateCheckpoint,finish,shoot,damageEnemy};`, sandbox);
-const { CONFIG, gameState, createStartingAmmo, resetGame, update, updateInput, updatePlayer, cycleAmmo, solids, explode, activateCheckpoint, finish, shoot, damageEnemy } = sandbox.testApi;
+vm.runInContext(`${gameSource}\n;globalThis.testApi={CONFIG,gameState,createStartingAmmo,resetGame,update,updateInput,updatePlayer,updateEnemies,updateProjectiles,cycleAmmo,solids,explode,activateCheckpoint,finish,shoot,damageEnemy};`, sandbox);
+const { CONFIG, gameState, createStartingAmmo, resetGame, update, updateInput, updatePlayer, updateEnemies, updateProjectiles, cycleAmmo, solids, explode, activateCheckpoint, finish, shoot, damageEnemy } = sandbox.testApi;
 
 assert.equal(gameState.phase, "start");
 canvas.dispatch("mousedown", { button: 0 });
@@ -162,5 +162,57 @@ function heldWallClimb(side) {
 }
 heldWallClimb("right");
 heldWallClimb("left");
+
+resetGame();
+const wall = gameState.wall;
+const wallBottomBlast = { x: wall.x - CONFIG.projectile.explosionRadius / 2, y: wall.y + wall.h - 4, alive: true };
+explode(wallBottomBlast);
+assert.equal(wall.active, false, "an overlapping explosion destroys the full wall rectangle, not only its center");
+assert(!solids().includes(wall), "a destroyed wall immediately leaves solid collision");
+assert(gameState.effects.some(effect => effect.type === "destruction"), "wall destruction creates debris feedback");
+
+resetGame();
+gameState.projectiles.push({ type: "freeze", x: gameState.wall.x - 8, y: gameState.wall.y + 30, radius: CONFIG.projectile.radius, vx: 500, vy: 0, life: 1, alive: true, bounces: 0, trail: [] });
+updateProjectiles(1 / 30);
+assert.equal(gameState.wall.active, true, "a non-explosion projectile cannot destroy the wall");
+
+resetGame();
+const switchEffectCount = gameState.effects.length;
+gameState.projectiles.push({ type: "bounce", x: gameState.switch.x + gameState.switch.w / 2, y: gameState.switch.y + gameState.switch.h / 2, radius: CONFIG.projectile.radius, vx: 0, vy: 0, life: 1, alive: true, bounces: 1, trail: [] });
+updateProjectiles(0);
+assert.equal(gameState.switch.active, true, "a ricochet-capable projectile activates the indirect switch");
+assert.equal(gameState.door.active, false, "switch activation opens the shortcut door");
+const activatedEffectCount = gameState.effects.length;
+updateProjectiles(0);
+assert.equal(gameState.effects.length, activatedEffectCount, "the switch side effect runs only once");
+assert(activatedEffectCount > switchEffectCount);
+
+resetGame();
+const platformEnemy = gameState.enemies[2];
+platformEnemy.frozen = CONFIG.projectile.freezeDuration;
+platformEnemy.vx = 0; platformEnemy.vy = 0;
+gameState.player.x = platformEnemy.x + 4;
+gameState.player.y = platformEnemy.y - gameState.player.h - 3;
+gameState.player.vx = 0; gameState.player.vy = 180; gameState.player.grounded = false;
+updatePlayer(1 / 30);
+assert.equal(gameState.player.y, platformEnemy.y - gameState.player.h, "the player lands on a frozen enemy's top");
+assert(gameState.player.grounded && gameState.player.frozenSupport === platformEnemy, "the player can stand and jump from the frozen platform");
+const healthOnIce = gameState.player.health;
+updatePlayer(1 / 60);
+assert.equal(gameState.player.health, healthOnIce, "a frozen enemy has no contact damage");
+platformEnemy.frozen = 0.001;
+updateEnemies(1 / 60);
+assert(gameState.player.vy < 0 && gameState.player.y + gameState.player.h <= platformEnemy.y, "thawing safely lifts a supported player clear");
+
+resetGame();
+gameState.wall.active = false; gameState.switch.active = true; gameState.door.active = false; gameState.collectible.collected = true;
+resetGame();
+assert(gameState.wall.active && !gameState.switch.active && gameState.door.active && !gameState.collectible.collected, "full restart resets every environmental interaction");
+
+resetGame();
+gameState.player.ammo = [];
+gameState.player.x = gameState.goal.x; gameState.player.y = gameState.goal.y;
+updatePlayer(0);
+assert.equal(gameState.result, "win", "the goal has no ammo-state gate and remains reachable with an empty inventory");
 
 console.log("All gameplay/input assertions passed");
