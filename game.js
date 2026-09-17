@@ -4,9 +4,9 @@
 const CONFIG = Object.freeze({
   canvas: { width: 960, height: 540 },
   physics: { gravity: 1800, maxFall: 900, epsilon: 0.01, maxDt: 0.033 },
-  player: { width: 30, height: 42, startX: 90, startY: 420, accel: 1900, airAccel: 1050, decel: 2200, maxSpeed: 270, jump: 610, jumpCut: 0.48, health: 4, invulnerability: 1.1, retries: 2, shotCooldown: 0.18, knockback: 560 },
+  player: { width: 30, height: 42, startX: 90, startY: 420, accel: 1900, airAccel: 1050, decel: 2200, maxSpeed: 270, jump: 610, jumpCut: 0.48, health: 4, invulnerability: 1.1, retries: 2, shotCooldown: 0.18, knockback: 560, wallSlideMaxFallSpeed: 155, wallJumpHorizontalSpeed: 335, wallJumpVerticalSpeed: 590, wallContactTolerance: 2, wallJumpControlLockDuration: 0.14, wallRecontactDuration: 0.08 },
   camera: { follow: 5.5, lead: 300 },
-  ammo: { capacity: 5, holdDelay: 0.48, repeat: 0.22, orbitRadius: 35, orbitSpeed: 1.8 },
+  ammo: { capacity: 5, orbitRadius: 35, orbitSpeed: 1.8 },
   projectile: { radius: 7, speed: 570, inherit: 0.18, lifetime: 4, damage: 1, bounceCount: 3, restitution: 0.82, explosionRadius: 105, freezeDuration: 5 },
   enemies: { width: 38, height: 34, health: 1, fireSpeed: 62, iceSpeed: 43, hopSpeed: 310, hopPeriod: 1.7, contactDamage: 1, hitTime: 0.15 },
   effects: { defaultLife: 0.65, explosionLife: 0.38, messageLife: 1.5, particleCount: 10 },
@@ -27,7 +27,7 @@ const ctx = canvas.getContext("2d");
 // The sole mutable root. Event handlers only write into this tree.
 const gameState = {
   phase: "start", result: null, time: 0, lastFrame: 0,
-  camera: { x: 0 }, input: { keys: {}, pressed: {}, mouse: { x: 700, y: 280, down: false }, qHeld: 0, qRepeated: false },
+  camera: { x: 0 }, input: { keys: {}, pressed: {}, mouse: { x: 700, y: 280, down: false, jumpDown: false }, jump: { pressed: false, held: false, released: false } },
   player: null, platforms: [], slopes: [], enemies: [], projectiles: [], effects: [],
   wall: null, switch: null, door: null, checkpoint: null, goal: null,
   collectible: { x: 1370, y: 342, radius: 13, collected: false }, assets: {}
@@ -62,8 +62,14 @@ function resetGame() {
   buildLevel();
   gameState.phase = "playing"; gameState.result = null; gameState.time = 0; gameState.camera.x = 0;
   gameState.projectiles = []; gameState.effects = [];
-  gameState.player = { x: CONFIG.player.startX, y: CONFIG.player.startY, w: CONFIG.player.width, h: CONFIG.player.height, vx: 0, vy: 0, grounded: false, health: CONFIG.player.health, retries: CONFIG.player.retries, invulnerable: 0, cooldown: 0, ammo: [], selectedAmmoIndex: 0, respawn: { x: CONFIG.player.startX, y: CONFIG.player.startY }, emptyFlash: 0 };
-  gameState.input.qHeld = 0; gameState.input.qRepeated = false; gameState.input.mouse.down = false;
+  gameState.player = { x: CONFIG.player.startX, y: CONFIG.player.startY, w: CONFIG.player.width, h: CONFIG.player.height, vx: 0, vy: 0, grounded: false, health: CONFIG.player.health, retries: CONFIG.player.retries, invulnerable: 0, cooldown: 0, ammo: [], selectedAmmoIndex: 0, respawn: { x: CONFIG.player.startX, y: CONFIG.player.startY }, emptyFlash: 0, wallContact: { left: false, right: false }, isWallSliding: false, wallJumpLockTimer: 0, wallJumpBlockedSide: null, wallDetachTimer: 0 };
+  clearGameplayInput();
+}
+
+function clearGameplayInput() {
+  const i = gameState.input;
+  i.keys = {}; i.pressed = {}; i.mouse.down = false; i.mouse.jumpDown = false;
+  i.jump.pressed = false; i.jump.held = false; i.jump.released = false;
 }
 
 function overlap(a, b) { return Boolean(a && b && a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y); }
@@ -78,7 +84,13 @@ function solids(includeFrozen = false) {
 }
 function addEffect(type, x, y, color, life = CONFIG.effects.defaultLife, text = "") { gameState.effects.push({ type, x, y, color, life, maxLife: life, text }); }
 function clampAmmoIndex() { const p = gameState.player; p.selectedAmmoIndex = p.ammo.length ? Math.max(0, Math.min(p.selectedAmmoIndex, p.ammo.length - 1)) : 0; }
-function cycleAmmo() { const p = gameState.player; if (p?.ammo.length) p.selectedAmmoIndex = (p.selectedAmmoIndex + 1) % p.ammo.length; }
+function cycleAmmo(direction) {
+  const p = gameState.player; if (!p) return;
+  const count = p.ammo.length;
+  if (!count) { p.selectedAmmoIndex = 0; return; }
+  clampAmmoIndex();
+  p.selectedAmmoIndex = (p.selectedAmmoIndex + Math.sign(direction) + count) % count;
+}
 function grantAmmo(enemy) {
   if (enemy.dropGranted) return; enemy.dropGranted = true;
   const map = { fire: "explosion", slime: "bounce", ice: "freeze" }; const ammo = map[enemy.type];
@@ -112,24 +124,61 @@ function resolveBody(body, dt, extraSolids = true) {
 
 function updateInput(dt) {
   const i = gameState.input;
-  if (i.keys.KeyQ) {
-    i.qHeld += dt;
-    if (i.qHeld >= CONFIG.ammo.holdDelay) {
-      const repeats = Math.floor((i.qHeld - CONFIG.ammo.holdDelay) / CONFIG.ammo.repeat);
-      if (repeats >= (i.qRepeated || 0)) { cycleAmmo(); i.qRepeated = repeats + 1; }
-    }
+  const held = Boolean(i.keys.Space || i.mouse.jumpDown);
+  i.jump.pressed = !i.jump.held && Boolean(held || i.pressed.Space || i.pressed.MouseJump);
+  i.jump.released = i.jump.held && !held;
+  i.jump.held = held;
+}
+function detectWallContact(body) {
+  const tolerance = CONFIG.player.wallContactTolerance;
+  const contact = { left: false, right: false };
+  for (const solid of solids(true)) {
+    const verticalOverlap = body.y + body.h > solid.y + tolerance && body.y < solid.y + solid.h - tolerance;
+    if (!verticalOverlap) continue;
+    if (Math.abs(body.x - (solid.x + solid.w)) <= tolerance) contact.left = true;
+    if (Math.abs(body.x + body.w - solid.x) <= tolerance) contact.right = true;
+  }
+  return contact;
+}
+function getWallJumpSide(p) {
+  if (p.wallContact.left && p.wallJumpBlockedSide !== "left") return "left";
+  if (p.wallContact.right && p.wallJumpBlockedSide !== "right") return "right";
+  return null;
+}
+function updateWallRecontact(p, dt) {
+  if (!p.wallJumpBlockedSide) return;
+  if (p.wallContact[p.wallJumpBlockedSide]) p.wallDetachTimer = 0;
+  else {
+    p.wallDetachTimer += dt;
+    if (p.wallDetachTimer >= CONFIG.player.wallRecontactDuration) { p.wallJumpBlockedSide = null; p.wallDetachTimer = 0; }
   }
 }
 function updatePlayer(dt) {
   const p = gameState.player, i = gameState.input; if (!p) return;
+  p.wallContact = detectWallContact(p);
+  updateWallRecontact(p, dt);
+  p.wallJumpLockTimer = Math.max(0, p.wallJumpLockTimer - dt);
   const direction = (i.keys.KeyD ? 1 : 0) - (i.keys.KeyA ? 1 : 0);
   const acceleration = p.grounded ? CONFIG.player.accel : CONFIG.player.airAccel;
-  if (direction) p.vx = Math.max(-CONFIG.player.maxSpeed, Math.min(CONFIG.player.maxSpeed, p.vx + direction * acceleration * dt));
-  else { const decel = CONFIG.player.decel * dt; p.vx = Math.abs(p.vx) <= decel ? 0 : p.vx - Math.sign(p.vx) * decel; }
-  if (i.pressed.Space && p.grounded) { p.vy = -CONFIG.player.jump; p.grounded = false; }
-  if (!i.keys.Space && p.vy < 0) p.vy *= Math.pow(CONFIG.player.jumpCut, dt);
+  if (p.wallJumpLockTimer <= 0) {
+    if (direction) p.vx = Math.max(-CONFIG.player.maxSpeed, Math.min(CONFIG.player.maxSpeed, p.vx + direction * acceleration * dt));
+    else { const decel = CONFIG.player.decel * dt; p.vx = Math.abs(p.vx) <= decel ? 0 : p.vx - Math.sign(p.vx) * decel; }
+  }
+  if (i.jump.pressed) {
+    const wallSide = !p.grounded ? getWallJumpSide(p) : null;
+    if (p.grounded) { p.vy = -CONFIG.player.jump; p.grounded = false; }
+    else if (wallSide) {
+      p.vx = wallSide === "left" ? CONFIG.player.wallJumpHorizontalSpeed : -CONFIG.player.wallJumpHorizontalSpeed;
+      p.vy = -CONFIG.player.wallJumpVerticalSpeed; p.wallJumpLockTimer = CONFIG.player.wallJumpControlLockDuration;
+      p.wallJumpBlockedSide = wallSide; p.wallDetachTimer = 0;
+    }
+  }
+  if (!i.jump.held && p.vy < 0) p.vy *= Math.pow(CONFIG.player.jumpCut, dt);
   p.vy = Math.min(CONFIG.physics.maxFall, p.vy + CONFIG.physics.gravity * dt);
   resolveBody(p, dt, true);
+  p.wallContact = detectWallContact(p);
+  p.isWallSliding = !p.grounded && (p.wallContact.left || p.wallContact.right) && p.vy >= 0;
+  if (p.isWallSliding) p.vy = Math.min(p.vy, CONFIG.player.wallSlideMaxFallSpeed);
   p.invulnerable = Math.max(0, p.invulnerable - dt); p.cooldown = Math.max(0, p.cooldown - dt); p.emptyFlash = Math.max(0, p.emptyFlash - dt);
   if (i.mouse.down && p.cooldown <= 0) shoot();
   for (const e of gameState.enemies) if (e.alive && e.frozen <= 0 && overlap(p, e)) {
@@ -149,7 +198,7 @@ function damagePlayer(amount, direction) {
 }
 function killPlayer() {
   const p = gameState.player; if (p.retries <= 0) { finish("lose"); return; }
-  p.retries -= 1; p.health = CONFIG.player.health; p.x = p.respawn.x; p.y = p.respawn.y; p.vx = 0; p.vy = 0; p.invulnerable = CONFIG.player.invulnerability; gameState.projectiles = [];
+  p.retries -= 1; p.health = CONFIG.player.health; p.x = p.respawn.x; p.y = p.respawn.y; p.vx = 0; p.vy = 0; p.grounded = false; p.wallContact = { left: false, right: false }; p.isWallSliding = false; p.wallJumpLockTimer = 0; p.wallJumpBlockedSide = null; p.wallDetachTimer = 0; p.invulnerable = CONFIG.player.invulnerability; gameState.projectiles = []; clearGameplayInput();
   addEffect("text", p.x, p.y, CONFIG.colors.gold, CONFIG.effects.messageLife, `RESPAWN • ${p.retries} RETRIES`);
 }
 function activateCheckpoint() {
@@ -209,7 +258,7 @@ function updateProjectiles(dt) {
 function updateEffects(dt) { for (const e of gameState.effects) { e.life -= dt; if (e.type === "text") e.y -= CONFIG.render.fontMedium * dt; } }
 function cleanup() { gameState.projectiles = gameState.projectiles.filter(p => p.alive && p.life > 0 && validEntity(p)); gameState.effects = gameState.effects.filter(e => e.life > 0 && validEntity(e)); gameState.enemies = gameState.enemies.filter(e => e.alive && validEntity(e)); }
 function updateCamera(dt) { const target=Math.max(0,Math.min(CONFIG.level.width-CONFIG.canvas.width,gameState.player.x-CONFIG.camera.lead)); gameState.camera.x += (target-gameState.camera.x)*Math.min(1,CONFIG.camera.follow*dt); }
-function finish(result) { gameState.phase="gameover"; gameState.result=result; gameState.input.mouse.down=false; }
+function finish(result) { gameState.phase="gameover"; gameState.result=result; clearGameplayInput(); }
 function update(dt) {
   if (gameState.phase !== "playing") return; gameState.time += dt; updateInput(dt); updatePlayer(dt); updateEnemies(dt); updateProjectiles(dt); updateEffects(dt); cleanup(); updateCamera(dt); gameState.input.pressed = {};
 }
@@ -236,13 +285,15 @@ function renderPlayer(){const p=gameState.player;if(!p)return;const blink=p.invu
 function renderEffects(){for(const e of gameState.effects){const alpha=Math.max(0,e.life/e.maxLife);ctx.globalAlpha=alpha;if(e.type==="explosion"){ctx.fillStyle=e.color;ctx.beginPath();ctx.arc(e.x,e.y,CONFIG.projectile.explosionRadius*(1-alpha*.4),0,CONFIG.render.pi2);ctx.fill();}else if(e.type==="burst"){ctx.strokeStyle=e.color;ctx.lineWidth=5;ctx.beginPath();ctx.arc(e.x,e.y,30*(1-alpha),0,CONFIG.render.pi2);ctx.stroke();}else{ctx.fillStyle=e.color;ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(e.text,e.x,e.y);}ctx.globalAlpha=1;}}
 function renderHud(){const p=gameState.player;ctx.fillStyle="#08101fdd";ctx.fillRect(16,16,470,74);ctx.fillStyle="#fff";ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(`HP ${"♥".repeat(Math.max(0,p.health))}   RETRIES ${p.retries}`,30,44);ctx.font=`${CONFIG.render.fontSmall}px sans-serif`;ctx.fillText("AMMO",30,72);if(!p.ammo.length){ctx.fillStyle="#8995ac";ctx.fillText("EMPTY — defeat enemies",92,72);}p.ammo.forEach((type,i)=>{const x=92+i*72;ctx.fillStyle=ammoColor(type);ctx.fillRect(x,58,14,14);ctx.fillStyle="#fff";ctx.fillText(type[0].toUpperCase(),x+20,71);if(i===p.selectedAmmoIndex)ctx.strokeRect(x-4,54,62,22);});ctx.fillStyle=gameState.collectible.collected?CONFIG.colors.gold:"#8995ac";ctx.fillText(`SECRET ${gameState.collectible.collected?"✓":"○"}`,385,71);}
 function overlay(title, lines, footer, color="#fff"){ctx.fillStyle=`rgba(5,9,20,${CONFIG.render.overlayAlpha})`;ctx.fillRect(0,0,CONFIG.canvas.width,CONFIG.canvas.height);ctx.textAlign="center";ctx.fillStyle=color;ctx.font=`900 ${CONFIG.render.fontLarge}px sans-serif`;ctx.fillText(title,CONFIG.canvas.width/2,145);ctx.font=`${CONFIG.render.fontMedium}px sans-serif`;lines.forEach((line,i)=>ctx.fillText(line,CONFIG.canvas.width/2,215+i*34));ctx.fillStyle=CONFIG.colors.gold;ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(footer,CONFIG.canvas.width/2,410);ctx.textAlign="left";}
-function render(){drawBackground();if(gameState.phase!=="start"&&gameState.player){ctx.save();ctx.translate(-gameState.camera.x,0);renderLevel();renderEnemies();renderProjectiles();renderPlayer();renderEffects();ctx.restore();renderHud();}if(gameState.phase==="start")overlay("ELEMENT RUN",["敵を倒して属性弾を獲得。順番を選び、道を切り拓こう。","A / D: 移動    Space: ジャンプ    Mouse: 照準 / 発射","Q: 弾薬を切替（長押しで連続選択）"],"クリック または Enter でスタート",CONFIG.colors.freeze);else if(gameState.phase==="gameover")overlay(gameState.result==="win"?"COURSE CLEAR!":"RUN OVER",[gameState.result==="win"?`秘密のコア: ${gameState.collectible.collected?"獲得!":"未獲得"}`:"リトライを使い切りました",gameState.result==="win"?"全ゾーンを走破しました。":"もう一度コースに挑戦しよう。"],"R または Enter で最初から",gameState.result==="win"?CONFIG.colors.gold:CONFIG.colors.danger);}
+function render(){drawBackground();if(gameState.phase!=="start"&&gameState.player){ctx.save();ctx.translate(-gameState.camera.x,0);renderLevel();renderEnemies();renderProjectiles();renderPlayer();renderEffects();ctx.restore();renderHud();}if(gameState.phase==="start")overlay("ELEMENT RUN",["敵を倒して属性弾を獲得。順番を選び、道を切り拓こう。","A / D: 移動    マウス: 照準    左クリック: 発射","右クリック / Space: ジャンプ    ホイール: 弾薬切替"],"左クリック または Enter でスタート",CONFIG.colors.freeze);else if(gameState.phase==="gameover")overlay(gameState.result==="win"?"COURSE CLEAR!":"RUN OVER",[gameState.result==="win"?`秘密のコア: ${gameState.collectible.collected?"獲得!":"未獲得"}`:"リトライを使い切りました",gameState.result==="win"?"全ゾーンを走破しました。":"もう一度コースに挑戦しよう。"],"R または Enter で最初から",gameState.result==="win"?CONFIG.colors.gold:CONFIG.colors.danger);}
 
 function frame(now){const dt=Math.min(CONFIG.physics.maxDt,(now-gameState.lastFrame)/1000||0);gameState.lastFrame=now;update(dt);render();requestAnimationFrame(frame);}
 function pressStartOrRestart(){if(gameState.phase==="start"||gameState.phase==="gameover")resetGame();}
-window.addEventListener("keydown",e=>{gameState.input.keys[e.code]=true;if(!e.repeat)gameState.input.pressed[e.code]=true;if(["Space","KeyQ"].includes(e.code))e.preventDefault();if((e.code==="Enter"||e.code==="KeyR")&&(gameState.phase!=="playing"))pressStartOrRestart();});
-window.addEventListener("keyup",e=>{gameState.input.keys[e.code]=false;if(e.code==="KeyQ"){if(gameState.input.qHeld<CONFIG.ammo.holdDelay)cycleAmmo();gameState.input.qHeld=0;gameState.input.qRepeated=false;}});
+window.addEventListener("keydown",e=>{gameState.input.keys[e.code]=true;if(!e.repeat)gameState.input.pressed[e.code]=true;if(e.code==="Space")e.preventDefault();if((e.code==="Enter"||e.code==="KeyR")&&(gameState.phase!=="playing"))pressStartOrRestart();});
+window.addEventListener("keyup",e=>{gameState.input.keys[e.code]=false;});
 canvas.addEventListener("mousemove",e=>{const r=canvas.getBoundingClientRect();gameState.input.mouse.x=(e.clientX-r.left)*CONFIG.canvas.width/r.width;gameState.input.mouse.y=(e.clientY-r.top)*CONFIG.canvas.height/r.height;});
-canvas.addEventListener("mousedown",e=>{if(e.button===0){if(gameState.phase!=="playing")pressStartOrRestart();else gameState.input.mouse.down=true;}});window.addEventListener("mouseup",e=>{if(e.button===0)gameState.input.mouse.down=false;});
-canvas.addEventListener("contextmenu",e=>e.preventDefault());window.addEventListener("blur",()=>{gameState.input.keys={};gameState.input.mouse.down=false;});
+canvas.addEventListener("mousedown",e=>{if(e.button===0){if(gameState.phase!=="playing")pressStartOrRestart();else gameState.input.mouse.down=true;}else if(e.button===2&&gameState.phase==="playing"){gameState.input.mouse.jumpDown=true;gameState.input.pressed.MouseJump=true;}});
+window.addEventListener("mouseup",e=>{if(e.button===0)gameState.input.mouse.down=false;else if(e.button===2)gameState.input.mouse.jumpDown=false;});
+canvas.addEventListener("wheel",e=>{e.preventDefault();if(gameState.phase==="playing"&&e.deltaY)cycleAmmo(e.deltaY>0?1:-1);},{passive:false});
+canvas.addEventListener("contextmenu",e=>e.preventDefault());window.addEventListener("blur",clearGameplayInput);
 requestAnimationFrame(frame);
