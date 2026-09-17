@@ -23,8 +23,8 @@ const windowStub = new EventTargetStub();
 const sandbox = { console, Math, Object, Boolean, Number, Set, document: { getElementById: () => canvas }, window: windowStub, requestAnimationFrame: noop };
 vm.createContext(sandbox);
 const gameSource = fs.readFileSync(path.join(__dirname, "..", "game.js"), "utf8");
-vm.runInContext(`${gameSource}\n;globalThis.testApi={CONFIG,gameState,createStartingAmmo,resetGame,update,updateInput,updatePlayer,updateEnemies,updateProjectiles,updateShards,cleanup,cycleAmmo,solids,explode,activateCheckpoint,finish,shoot,damageEnemy,triggerShatter,conveyorVelocity};`, sandbox);
-const { CONFIG, gameState, createStartingAmmo, resetGame, update, updateInput, updatePlayer, updateEnemies, updateProjectiles, updateShards, cleanup, cycleAmmo, solids, explode, activateCheckpoint, finish, shoot, damageEnemy, triggerShatter, conveyorVelocity } = sandbox.testApi;
+vm.runInContext(`${gameSource}\n;globalThis.testApi={CONFIG,gameState,createStartingAmmo,resetGame,update,updateInput,updatePlayer,updateEnemies,updateMovableBoxes,updateProjectiles,updateShards,cleanup,cycleAmmo,solids,explode,activateCheckpoint,finish,shoot,damageEnemy,triggerShatter,conveyorVelocity};`, sandbox);
+const { CONFIG, gameState, createStartingAmmo, resetGame, update, updateInput, updatePlayer, updateEnemies, updateMovableBoxes, updateProjectiles, updateShards, cleanup, cycleAmmo, solids, explode, activateCheckpoint, finish, shoot, damageEnemy, triggerShatter, conveyorVelocity } = sandbox.testApi;
 
 assert.equal(gameState.phase, "start");
 canvas.dispatch("mousedown", { button: 0 });
@@ -321,5 +321,95 @@ gameState.player.x = gameState.checkpoint.respawnX; gameState.player.y = CONFIG.
 gameState.player.retries = 1; updatePlayer(0);
 assert.equal(gameState.player.frozenSupport, null, "checkpoint respawn clears stale frozen support");
 assert.equal(gameState.player.supportSurface, null, "checkpoint respawn clears stale ground support");
+
+function isolatedBox(x = 3000, y = CONFIG.level.floorY - CONFIG.movableBox.height) {
+  resetGame();
+  const box = gameState.movableBoxes[0];
+  box.x = x; box.y = y; box.previousX = x; box.previousY = y; box.vx = 0; box.vy = 0; box.grounded = true;
+  box.supportSurface = gameState.platforms.find(surface => x >= surface.x && x < surface.x + surface.w);
+  gameState.enemies.forEach(enemy => { enemy.x = 100; enemy.minX = 50; enemy.maxX = 150; });
+  return box;
+}
+
+let box = isolatedBox();
+const sidePlayer = gameState.player;
+sidePlayer.x = box.x - sidePlayer.w; sidePlayer.y = box.y; sidePlayer.vx = CONFIG.player.maxSpeed; sidePlayer.vy = 0; sidePlayer.grounded = true;
+updatePlayer(1 / 30);
+assert.equal(sidePlayer.x + sidePlayer.w, box.x, "walking into a box side blocks the player");
+assert.equal(box.vx, 0, "player movement never pushes a box");
+
+box = isolatedBox();
+const boxRider = gameState.player;
+boxRider.x = box.x + 5; boxRider.y = box.y - boxRider.h - 3; boxRider.vy = 180; boxRider.grounded = false;
+updatePlayer(1 / 30);
+assert(boxRider.grounded && boxRider.boxSupport === box, "the player lands and stands on a movable box");
+gameState.input.jump.pressed = true; gameState.input.jump.held = true; updatePlayer(1 / 60);
+assert(boxRider.vy < 0 && !boxRider.grounded, "the player jumps normally from a movable box");
+
+for (const [label, blast, test] of [
+  ["left", { x: 2950, y: 457 }, value => value > 0],
+  ["right", { x: 3100, y: 457 }, value => value < 0],
+  ["below", { x: 3023, y: 520 }, (_value, target) => target.vy < 0]
+]) {
+  box = isolatedBox(); explode({ ...blast, alive: true });
+  assert(test(box.vx, box), `an explosion ${label} of the box applies the expected impulse`);
+}
+box = isolatedBox(); explode({ x: box.x + box.w / 2, y: box.y + box.h / 2, alive: true });
+assert(Number.isFinite(box.vx) && Number.isFinite(box.vy), "a zero-distance blast cannot introduce NaN or Infinity");
+
+box = isolatedBox(3400); box.vx = CONFIG.movableBox.maxHorizontalSpeed;
+const stopWallForBox = { x: 3470, y: 250, w: 25, h: 230, active: true }; gameState.platforms.push(stopWallForBox);
+for (let frame = 0; frame < 20; frame++) updateMovableBoxes(1 / 30);
+assert(box.x + box.w <= stopWallForBox.x, "a high-speed box cannot tunnel through a wall");
+box.x = 3000; box.y = 300; box.vx = 0; box.vy = CONFIG.movableBox.maxVerticalSpeed; box.grounded = false;
+for (let frame = 0; frame < 20; frame++) updateMovableBoxes(1 / 30);
+assert(box.y + box.h <= CONFIG.level.floorY, "a high-speed falling box cannot tunnel through the floor");
+
+box = isolatedBox(); box.vx = 300;
+for (let frame = 0; frame < 120; frame++) updateMovableBoxes(1 / 60);
+assert.equal(box.vx, 0, "ordinary ground deceleration settles blast momentum");
+
+for (const beltIndex of [0, 1]) {
+  resetGame(); box = gameState.movableBoxes[0]; placeOnBelt(box, gameState.conveyors[beltIndex]);
+  const start = box.x; updateMovableBoxes(1 / 30);
+  assert(Math.sign(box.x - start) === gameState.conveyors[beltIndex].direction, `${gameState.conveyors[beltIndex].direction < 0 ? "left" : "right"} conveyor transports a box`);
+}
+resetGame(); box = gameState.movableBoxes[0]; const rideBelt = gameState.conveyors[1]; placeOnBelt(box, rideBelt);
+const conveyorRider = gameState.player; conveyorRider.x = box.x + 5; conveyorRider.y = box.y - conveyorRider.h; conveyorRider.vx = 0; conveyorRider.vy = 0; conveyorRider.grounded = true; conveyorRider.boxSupport = box; conveyorRider.supportSurface = box;
+const rideOffset = conveyorRider.x - box.x; update(1 / 60);
+assert(Math.abs((conveyorRider.x - box.x) - rideOffset) < 0.1, "a player rides a conveyor-transported box without support lag");
+
+resetGame(); box = gameState.movableBoxes[0]; box.x = gameState.conveyors[1].x + 60; box.y = gameState.conveyors[1].y - box.h; box.grounded = true; box.supportSurface = gameState.conveyors[1];
+explode({ x: box.x + box.w / 2, y: box.y + box.h + 70, alive: true });
+for (let frame = 0; frame < 180; frame++) updateMovableBoxes(1 / 120);
+assert(box.supportSurface === gameState.conveyors[1] || box.x > gameState.conveyors[1].x, "an explosion-launched box can land on and be transported by a conveyor");
+
+box = isolatedBox(3000); const impactEnemy = gameState.enemies[0]; impactEnemy.x = 3065; impactEnemy.y = CONFIG.level.floorY - impactEnemy.h; impactEnemy.minX = impactEnemy.x; impactEnemy.maxX = impactEnemy.x + impactEnemy.w; impactEnemy.vx = 0; impactEnemy.hp = 2;
+box.vx = CONFIG.movableBox.enemyDamageMinSpeed + 100; updateMovableBoxes(1 / 10);
+assert.equal(impactEnemy.hp, 1, "one fast box impact uses shared enemy damage once");
+updateMovableBoxes(1 / 60); assert.equal(impactEnemy.hp, 1, "continued contact cannot damage every frame");
+box.x = impactEnemy.x - box.w + 1; box.vx = CONFIG.movableBox.enemyDamageMinSpeed - 1; updateMovableBoxes(0);
+assert.equal(impactEnemy.hp, 1, "a slow touching box deals no damage");
+box.impactCooldowns = {}; box.vx = CONFIG.movableBox.enemyDamageMinSpeed + 10; updateMovableBoxes(0);
+assert.equal(impactEnemy.alive, false, "a later meaningful impact can defeat the enemy");
+assert.equal(impactEnemy.dropGranted, true, "box defeat grants the normal drop exactly once");
+
+box = isolatedBox();
+gameState.projectiles.push({ type: "bounce", x: box.x - 5, y: box.y + box.h / 2, radius: CONFIG.projectile.radius, vx: 500, vy: 0, life: 1, alive: true, bounces: 0, trail: [] });
+updateProjectiles(1 / 60); assert(gameState.projectiles[0].vx < 0 && box.vx === 0, "Bounce reflects from a box without launching it");
+gameState.projectiles = [{ type: "freeze", x: box.x - 5, y: box.y + box.h / 2, radius: CONFIG.projectile.radius, vx: 500, vy: 0, life: 1, alive: true, bounces: 0, trail: [] }];
+updateProjectiles(1 / 60); assert.equal(box.vx, 0, "Freeze creates no box state or impulse");
+gameState.shards = [{ x: box.x - 5, y: box.y + box.h / 2, radius: CONFIG.shatter.shardSize, vx: 500, vy: 0, angle: 0, life: 1, alive: true, source: null }];
+updateShards(1 / 60); assert.equal(box.vx, 0, "Shatter shards create no box impulse");
+
+box = isolatedBox(); gameState.player.boxSupport = box; gameState.player.supportSurface = box; gameState.player.grounded = true; box.y = CONFIG.level.killY + CONFIG.movableBox.cleanupMargin + 1;
+updateMovableBoxes(0); cleanup();
+assert.equal(gameState.movableBoxes.length, 0, "a box falling beyond world bounds is cleaned up");
+assert(!gameState.player.boxSupport && !gameState.player.supportSurface && !gameState.player.grounded, "box cleanup clears stale player support");
+gameState.player.x = gameState.checkpoint.respawnX; gameState.player.y = CONFIG.level.killY + 1; gameState.player.retries = 1; updatePlayer(0);
+assert.equal(gameState.player.boxSupport, null, "checkpoint respawn keeps box support null-safe");
+resetGame(); assert.equal(gameState.movableBoxes.length, 1, "a full restart restores level-defined boxes");
+gameState.movableBoxes[0].active = false; cleanup(); gameState.player.x = gameState.goal.x; gameState.player.y = gameState.goal.y; updatePlayer(0);
+assert.equal(gameState.result, "win", "losing the optional box cannot block normal level completion");
 
 console.log("All gameplay/input assertions passed");

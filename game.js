@@ -8,6 +8,7 @@ const CONFIG = Object.freeze({
   camera: { follow: 5.5, lead: 300 },
   ammo: { types: Object.freeze(["explosion", "bounce", "freeze"]), capacity: 5, followerSpacing: 18, followerLift: 10 },
   conveyor: { speed: 95, contactTolerance: 2, visualStripeSpacing: 28, visualScrollSpeed: 70 },
+  movableBox: { width: 46, height: 46, gravity: 1800, maxFallSpeed: 900, explosionImpulse: 520, maxHorizontalSpeed: 620, maxVerticalSpeed: 760, groundDeceleration: 620, enemyDamageMinSpeed: 230, enemyImpactDamage: 1, enemyImpactCooldown: 0.35, impactVelocityRetain: -0.18, contactTolerance: 2, maxMoveStep: 8, cleanupMargin: 160, borderWidth: 3, cornerSize: 9, flashDuration: 0.16 },
   projectile: { radius: 7, speed: 570, inherit: 0.18, lifetime: 4, damage: 1, bounceCount: 3, restitution: 0.82, explosionRadius: 105, freezeDuration: 5 },
   shatter: { shardCount: 6, shardSpeed: 360, shardLifetime: 0.7, shardDamage: 1, shardSize: 7, flashDuration: 0.28, flashRadius: 48, flashStartScale: 0.65 },
   enemies: { width: 38, height: 34, health: 1, fireSpeed: 62, iceSpeed: 43, hopSpeed: 310, hopPeriod: 1.7, contactDamage: 1, hitTime: 0.15 },
@@ -31,7 +32,7 @@ const ctx = canvas.getContext("2d");
 const gameState = {
   phase: "start", result: null, time: 0, lastFrame: 0,
   camera: { x: 0 }, input: { keys: {}, pressed: {}, mouse: { x: 700, y: 280, down: false, jumpDown: false }, jump: { pressed: false, held: false, released: false } },
-  player: null, platforms: [], conveyors: [], slopes: [], enemies: [], projectiles: [], shards: [], effects: [],
+  player: null, platforms: [], conveyors: [], slopes: [], movableBoxes: [], enemies: [], projectiles: [], shards: [], effects: [],
   wall: null, switch: null, door: null, checkpoint: null, goal: null,
   collectible: { x: 1370, y: 342, radius: 13, collected: false }, assets: {}
 };
@@ -40,6 +41,9 @@ function rect(x, y, w, h, kind = "solid") { return { x, y, w, h, kind, active: t
 function conveyor(x, y, w, h, direction) { return { x, y, w, h, kind: "conveyor", direction: Math.sign(direction) || 1, active: true }; }
 function makeEnemy(type, x, y, minX, maxX) {
   return { type, x, y, w: CONFIG.enemies.width, h: CONFIG.enemies.height, vx: type === "ice" ? CONFIG.enemies.iceSpeed : CONFIG.enemies.fireSpeed, vy: 0, minX, maxX, hp: CONFIG.enemies.health, frozen: 0, hit: 0, hopClock: 0, alive: true, dropGranted: false, grounded: false };
+}
+function makeMovableBox(definition) {
+  return { type: "movableBox", x: definition.x, y: definition.y, w: CONFIG.movableBox.width, h: CONFIG.movableBox.height, vx: 0, vy: 0, grounded: false, supportSurface: null, previousX: definition.x, previousY: definition.y, surfaceDeltaX: 0, active: true, impactCooldowns: {}, flash: 0 };
 }
 function buildLevel() {
   const f = CONFIG.level.floorY;
@@ -53,12 +57,17 @@ function buildLevel() {
   // Static environment data. The late right belt and ledge form an optional
   // freeze-and-ride route; neither belt blocks the ordinary floor route.
   gameState.conveyors = [conveyor(1840, f, 290, 80, -1), conveyor(3890, f, 390, 80, 1)];
+  // One optional demonstration area: the crate rides toward an enemy and can
+  // be blast-positioned beneath the nearby ledge; the floor route stays open.
+  const environment = [{ type: "movableBox", x: 4200, y: f - CONFIG.movableBox.height }];
+  gameState.movableBoxes = environment.filter(item => item.type === "movableBox").map(makeMovableBox);
   gameState.slopes = [{ x: 2380, y: f, w: 240, h: 100, direction: 1 }];
   gameState.enemies = [
     makeEnemy("fire", 760, 446, 650, 850), makeEnemy("slime", 1160, 446, 1010, 1450), makeEnemy("ice", 2080, 446, 1900, 2300),
     makeEnemy("fire", 3650, 446, 3600, 3670), makeEnemy("slime", 3725, 446, 3700, 3755), makeEnemy("ice", 3800, 446, 3780, 3840),
     makeEnemy("slime", 4100, 446, 3900, 4300), makeEnemy("ice", 4560, 446, 4400, 4800)
   ];
+  gameState.enemies.forEach((enemy, index) => { enemy.entityId = index; });
   gameState.wall = rect(1280, 270, 42, 210, "destructible");
   gameState.switch = { x: 2190, y: 220, w: 28, h: 28, active: false };
   gameState.door = rect(2340, 350, 34, 130, "door");
@@ -76,7 +85,7 @@ function resetGame() {
   buildLevel();
   gameState.phase = "playing"; gameState.result = null; gameState.time = 0; gameState.camera.x = 0;
   gameState.projectiles = []; gameState.shards = []; gameState.effects = [];
-  gameState.player = { x: CONFIG.player.startX, y: CONFIG.player.startY, w: CONFIG.player.width, h: CONFIG.player.height, vx: 0, vy: 0, grounded: false, supportSurface: null, frozenSupport: null, health: CONFIG.player.health, retries: CONFIG.player.retries, invulnerable: 0, cooldown: 0, ammo: createStartingAmmo(), selectedAmmoIndex: 0, respawn: { x: CONFIG.player.startX, y: CONFIG.player.startY }, emptyFlash: 0, wallContact: { left: false, right: false }, isWallSliding: false, wallJumpLockTimer: 0, wallJumpBlockedSide: null, wallDetachTimer: 0 };
+  gameState.player = { x: CONFIG.player.startX, y: CONFIG.player.startY, w: CONFIG.player.width, h: CONFIG.player.height, vx: 0, vy: 0, grounded: false, supportSurface: null, frozenSupport: null, boxSupport: null, health: CONFIG.player.health, retries: CONFIG.player.retries, invulnerable: 0, cooldown: 0, ammo: createStartingAmmo(), selectedAmmoIndex: 0, respawn: { x: CONFIG.player.startX, y: CONFIG.player.startY }, emptyFlash: 0, wallContact: { left: false, right: false }, isWallSliding: false, wallJumpLockTimer: 0, wallJumpBlockedSide: null, wallDetachTimer: 0 };
   clearGameplayInput();
 }
 
@@ -94,6 +103,7 @@ function solids(includeFrozen = false) {
   const list = gameState.conveyors.filter(p => p.active).concat(gameState.platforms.filter(p => p.active));
   if (gameState.wall?.active) list.push(gameState.wall);
   if (gameState.door?.active && !gameState.switch?.active) list.push(gameState.door);
+  for (const box of gameState.movableBoxes) if (box.active) list.push(box);
   if (includeFrozen) for (const e of gameState.enemies) if (e.alive && e.frozen > 0) list.push(e);
   return list;
 }
@@ -224,11 +234,12 @@ function updateWallRecontact(p, dt) {
 }
 function updatePlayer(dt) {
   const p = gameState.player, i = gameState.input; if (!p) return;
-  const riding = p.frozenSupport;
-  if (riding?.alive && riding.frozen > 0 && Number.isFinite(riding.surfaceDeltaX) && validTopSupport(p, riding)) {
+  const riding = p.boxSupport || p.frozenSupport;
+  const ridingValid = p.boxSupport ? riding?.active : riding?.alive && riding.frozen > 0;
+  if (ridingValid && Number.isFinite(riding.surfaceDeltaX) && validTopSupport(p, riding)) {
     moveBodyHorizontal(p, riding.surfaceDeltaX, false);
-  } else if (riding && (!riding.alive || riding.frozen <= 0)) {
-    p.frozenSupport = null; p.grounded = false;
+  } else if (riding && !ridingValid) {
+    p.frozenSupport = null; p.boxSupport = null; p.supportSurface = null; p.grounded = false;
   }
   p.wallContact = detectWallContact(p);
   updateWallRecontact(p, dt);
@@ -256,6 +267,7 @@ function updatePlayer(dt) {
   const previousBottom = p.y + p.h;
   resolveBody(p, dt, false);
   resolveFrozenEnemyPlatforms(p, previousBottom);
+  p.boxSupport = p.grounded && p.supportSurface?.type === "movableBox" ? p.supportSurface : null;
   p.wallContact = detectWallContact(p);
   p.isWallSliding = !p.grounded && (p.wallContact.left || p.wallContact.right) && p.vy >= 0;
   if (p.isWallSliding) p.vy = Math.min(p.vy, CONFIG.player.wallSlideMaxFallSpeed);
@@ -290,7 +302,7 @@ function damagePlayer(amount, direction) {
 }
 function killPlayer() {
   const p = gameState.player; if (p.retries <= 0) { finish("lose"); return; }
-  p.retries -= 1; p.health = CONFIG.player.health; p.x = p.respawn.x; p.y = p.respawn.y; p.vx = 0; p.vy = 0; p.grounded = false; p.supportSurface = null; p.frozenSupport = null; p.wallContact = { left: false, right: false }; p.isWallSliding = false; p.wallJumpLockTimer = 0; p.wallJumpBlockedSide = null; p.wallDetachTimer = 0; p.invulnerable = CONFIG.player.invulnerability; gameState.projectiles = []; gameState.shards = []; clearGameplayInput();
+  p.retries -= 1; p.health = CONFIG.player.health; p.x = p.respawn.x; p.y = p.respawn.y; p.vx = 0; p.vy = 0; p.grounded = false; p.supportSurface = null; p.frozenSupport = null; p.boxSupport = null; p.wallContact = { left: false, right: false }; p.isWallSliding = false; p.wallJumpLockTimer = 0; p.wallJumpBlockedSide = null; p.wallDetachTimer = 0; p.invulnerable = CONFIG.player.invulnerability; gameState.projectiles = []; gameState.shards = []; clearGameplayInput();
   addEffect("text", p.x, p.y, CONFIG.colors.gold, CONFIG.effects.messageLife, `RESPAWN • ${p.retries} RETRIES`);
 }
 function activateCheckpoint() {
@@ -332,6 +344,47 @@ function updateEnemies(dt) {
     e.surfaceDeltaX = e.x - oldX;
   }
 }
+function damageEnemiesFromBox(box, impactSpeed) {
+  if (impactSpeed < CONFIG.movableBox.enemyDamageMinSpeed) return;
+  for (const enemy of gameState.enemies) {
+    if (!enemy.alive || enemy.frozen > 0 || !overlap(box, enemy) || (box.impactCooldowns[enemy.entityId] || 0) > 0) continue;
+    box.impactCooldowns[enemy.entityId] = CONFIG.movableBox.enemyImpactCooldown;
+    damageEnemy(enemy, CONFIG.movableBox.enemyImpactDamage);
+    box.vx *= CONFIG.movableBox.impactVelocityRetain;
+    box.vy *= Math.abs(CONFIG.movableBox.impactVelocityRetain);
+    break;
+  }
+}
+function updateMovableBoxes(dt) {
+  for (const box of gameState.movableBoxes) {
+    if (!box.active || !validEntity(box)) continue;
+    box.previousX = box.x; box.previousY = box.y; box.flash = Math.max(0, box.flash - dt);
+    for (const key of Object.keys(box.impactCooldowns)) {
+      box.impactCooldowns[key] -= dt;
+      if (box.impactCooldowns[key] <= 0) delete box.impactCooldowns[key];
+    }
+    if (box.grounded) {
+      const deceleration = CONFIG.movableBox.groundDeceleration * dt;
+      box.vx = Math.abs(box.vx) <= deceleration ? 0 : box.vx - Math.sign(box.vx) * deceleration;
+    }
+    box.vy = Math.min(CONFIG.movableBox.maxFallSpeed, box.vy + CONFIG.movableBox.gravity * dt);
+    box.vx = Math.max(-CONFIG.movableBox.maxHorizontalSpeed, Math.min(CONFIG.movableBox.maxHorizontalSpeed, box.vx));
+    box.vy = Math.max(-CONFIG.movableBox.maxVerticalSpeed, Math.min(CONFIG.movableBox.maxVerticalSpeed, box.vy));
+    const travel = Math.max(Math.abs(box.vx * dt + conveyorVelocity(box) * dt), Math.abs(box.vy * dt));
+    const steps = Math.max(1, Math.ceil(travel / CONFIG.movableBox.maxMoveStep));
+    for (let step = 0; step < steps; step++) {
+      const impactSpeed = Math.hypot(box.vx, box.vy);
+      resolveBody(box, dt / steps, true);
+      damageEnemiesFromBox(box, impactSpeed);
+    }
+    box.surfaceDeltaX = box.x - box.previousX;
+    if (box.y > CONFIG.level.killY + CONFIG.movableBox.cleanupMargin || box.x + box.w < -CONFIG.movableBox.cleanupMargin || box.x > CONFIG.level.width + CONFIG.movableBox.cleanupMargin) {
+      box.active = false;
+      const player = gameState.player;
+      if (player?.boxSupport === box || player?.supportSurface === box) { player.boxSupport = null; player.supportSurface = null; player.grounded = false; }
+    }
+  }
+}
 function projectileSolidHit(p) {
   for (const s of solids(false)) if (circleRect(p, s)) {
     const left = Math.abs((p.x + p.radius) - s.x), right = Math.abs((s.x+s.w) - (p.x-p.radius)), top = Math.abs((p.y+p.radius)-s.y), bottom = Math.abs((s.y+s.h)-(p.y-p.radius));
@@ -339,6 +392,8 @@ function projectileSolidHit(p) {
   } return null;
 }
 function explode(p) {
+  if (p.explosionResolved) return;
+  p.explosionResolved = true;
   p.alive = false; const hit = new Set();
   for (const e of gameState.enemies) if (e.alive) { const dx=e.x+e.w/2-p.x, dy=e.y+e.h/2-p.y; if (dx*dx+dy*dy <= CONFIG.projectile.explosionRadius**2 && !hit.has(e)) { hit.add(e); if (!triggerShatter(e)) damageEnemy(e, CONFIG.projectile.damage); } }
   if (gameState.wall?.active && circleRect({ x:p.x, y:p.y, radius:CONFIG.projectile.explosionRadius }, gameState.wall)) {
@@ -346,6 +401,16 @@ function explode(p) {
     gameState.wall.active=false;
     addEffect("destruction", cx, cy, CONFIG.colors.explosion, CONFIG.effects.destructionLife);
     addEffect("text", cx, cy, CONFIG.colors.explosion, CONFIG.effects.messageLife, "WALL DESTROYED");
+  }
+  const blast = { x: p.x, y: p.y, radius: CONFIG.projectile.explosionRadius };
+  for (const box of gameState.movableBoxes) if (box.active && circleRect(blast, box)) {
+    let dx = box.x + box.w / 2 - p.x, dy = box.y + box.h / 2 - p.y;
+    let distance = Math.hypot(dx, dy);
+    if (distance <= CONFIG.physics.epsilon) { dx = 0; dy = -1; distance = 1; }
+    box.vx = Math.max(-CONFIG.movableBox.maxHorizontalSpeed, Math.min(CONFIG.movableBox.maxHorizontalSpeed, box.vx + dx / distance * CONFIG.movableBox.explosionImpulse));
+    box.vy = Math.max(-CONFIG.movableBox.maxVerticalSpeed, Math.min(CONFIG.movableBox.maxVerticalSpeed, box.vy + dy / distance * CONFIG.movableBox.explosionImpulse));
+    box.grounded = false; box.supportSurface = null; box.flash = CONFIG.movableBox.flashDuration;
+    addEffect("burst", box.x + box.w / 2, box.y + box.h / 2, CONFIG.colors.explosion);
   }
   const pl=gameState.player, dx=pl.x+pl.w/2-p.x, dy=pl.y+pl.h/2-p.y, d=Math.hypot(dx,dy);
   if (d < CONFIG.projectile.explosionRadius && d > CONFIG.physics.epsilon) { const force=CONFIG.player.knockback*(1-d/CONFIG.projectile.explosionRadius); pl.vx += dx/d*force; pl.vy += dy/d*force; }
@@ -378,11 +443,11 @@ function updateProjectiles(dt) {
   }
 }
 function updateEffects(dt) { for (const e of gameState.effects) { e.life -= dt; if (e.type === "text") e.y -= CONFIG.render.fontMedium * dt; } }
-function cleanup() { gameState.projectiles = gameState.projectiles.filter(p => p.alive && p.life > 0 && validEntity(p)); gameState.shards = gameState.shards.filter(s => s.alive && s.life > 0 && validEntity(s)); gameState.effects = gameState.effects.filter(e => e.life > 0 && validEntity(e)); gameState.enemies = gameState.enemies.filter(e => e.alive && validEntity(e)); }
+function cleanup() { gameState.projectiles = gameState.projectiles.filter(p => p.alive && p.life > 0 && validEntity(p)); gameState.shards = gameState.shards.filter(s => s.alive && s.life > 0 && validEntity(s)); gameState.effects = gameState.effects.filter(e => e.life > 0 && validEntity(e)); gameState.enemies = gameState.enemies.filter(e => e.alive && validEntity(e)); gameState.movableBoxes = gameState.movableBoxes.filter(box => box.active && validEntity(box)); }
 function updateCamera(dt) { const target=Math.max(0,Math.min(CONFIG.level.width-CONFIG.canvas.width,gameState.player.x-CONFIG.camera.lead)); gameState.camera.x += (target-gameState.camera.x)*Math.min(1,CONFIG.camera.follow*dt); }
 function finish(result) { gameState.phase="gameover"; gameState.result=result; clearGameplayInput(); }
 function update(dt) {
-  if (gameState.phase !== "playing") return; gameState.time += dt; updateInput(dt); updateEnemies(dt); updatePlayer(dt); updateProjectiles(dt); updateShards(dt); updateEffects(dt); cleanup(); updateCamera(dt); gameState.input.pressed = {};
+  if (gameState.phase !== "playing") return; gameState.time += dt; updateInput(dt); updateMovableBoxes(dt); updateEnemies(dt); updatePlayer(dt); updateProjectiles(dt); updateShards(dt); updateEffects(dt); cleanup(); updateCamera(dt); gameState.input.pressed = {};
 }
 
 function drawWorldRect(r, fill, stroke=CONFIG.colors.edge) { if (!r?.active) return; ctx.fillStyle=fill; ctx.fillRect(r.x,r.y,r.w,r.h); ctx.strokeStyle=stroke; ctx.strokeRect(r.x+.5,r.y+.5,r.w-1,r.h-1); }
@@ -419,6 +484,20 @@ function drawConveyor(belt) {
   }
   ctx.restore();
 }
+function renderMovableBoxes() {
+  for (const box of gameState.movableBoxes) {
+    ctx.save();
+    ctx.fillStyle = box.flash > 0 ? "#ffd8b8" : "#9b6845";
+    ctx.fillRect(box.x, box.y, box.w, box.h);
+    ctx.strokeStyle = "#f0bd78"; ctx.lineWidth = CONFIG.movableBox.borderWidth;
+    ctx.strokeRect(box.x + CONFIG.movableBox.borderWidth / 2, box.y + CONFIG.movableBox.borderWidth / 2, box.w - CONFIG.movableBox.borderWidth, box.h - CONFIG.movableBox.borderWidth);
+    const corner = CONFIG.movableBox.cornerSize;
+    ctx.fillStyle = "#60412f";
+    for (const x of [box.x, box.x + box.w - corner]) for (const y of [box.y, box.y + box.h - corner]) ctx.fillRect(x, y, corner, corner);
+    ctx.strokeStyle = "#e5a968"; ctx.beginPath(); ctx.moveTo(box.x + corner, box.y + corner); ctx.lineTo(box.x + box.w - corner, box.y + box.h - corner); ctx.moveTo(box.x + box.w - corner, box.y + corner); ctx.lineTo(box.x + corner, box.y + box.h - corner); ctx.stroke();
+    ctx.restore();
+  }
+}
 function renderEnemies() { for(const e of gameState.enemies){ctx.save();if(e.hit>0)ctx.globalAlpha=.45;ctx.fillStyle=e.frozen>0?CONFIG.colors.freeze:e.type==="fire"?CONFIG.colors.explosion:e.type==="slime"?CONFIG.colors.bounce:"#9abfff";ctx.fillRect(e.x,e.y,e.w,e.h);ctx.strokeStyle=e.frozen>0?"#fff":"#1b2034";ctx.lineWidth=e.frozen>0?4:2;ctx.strokeRect(e.x,e.y,e.w,e.h);if(e.frozen>0){ctx.fillStyle="#dff8ff";ctx.fillRect(e.x-3,e.y-5,e.w+6,5);if(e.frozen<=CONFIG.interactions.thawWarning){ctx.globalAlpha=.45+.35*Math.sin(gameState.time*CONFIG.interactions.switchPulseSpeed);ctx.fillStyle="#fff";ctx.fillRect(e.x,e.y,e.w,e.h);}}ctx.fillStyle="#172033";ctx.fillRect(e.x+8,e.y+10,5,5);ctx.fillRect(e.x+25,e.y+10,5,5);ctx.restore();} }
 function renderProjectiles(){for(const p of gameState.projectiles){ctx.strokeStyle=ammoColor(p.type);ctx.globalAlpha=.25;ctx.beginPath();for(const t of p.trail)ctx.lineTo(t.x,t.y);ctx.stroke();ctx.globalAlpha=1;ctx.fillStyle=ammoColor(p.type);ctx.beginPath();ctx.arc(p.x,p.y,p.radius,0,CONFIG.render.pi2);ctx.fill();ctx.strokeStyle="#fff";ctx.stroke();}}
 function renderShards(){for(const shard of gameState.shards){ctx.save();ctx.translate(shard.x,shard.y);ctx.rotate(shard.angle);ctx.fillStyle="#dff8ff";ctx.strokeStyle=CONFIG.colors.freeze;ctx.beginPath();ctx.moveTo(CONFIG.shatter.shardSize,0);ctx.lineTo(0,CONFIG.shatter.shardSize/2);ctx.lineTo(-CONFIG.shatter.shardSize,0);ctx.lineTo(0,-CONFIG.shatter.shardSize/2);ctx.closePath();ctx.fill();ctx.stroke();ctx.restore();}}
@@ -429,7 +508,7 @@ function renderPlayer(){const p=gameState.player;if(!p)return;const blink=p.invu
 function renderEffects(){for(const e of gameState.effects){const alpha=Math.max(0,e.life/e.maxLife);ctx.globalAlpha=alpha;if(e.type==="explosion"||e.type==="shatter"){ctx.fillStyle=e.color;ctx.beginPath();ctx.arc(e.x,e.y,e.type==="shatter"?CONFIG.shatter.flashRadius*(1-alpha*(1-CONFIG.shatter.flashStartScale)):CONFIG.projectile.explosionRadius*(1-alpha*.4),0,CONFIG.render.pi2);ctx.fill();}else if(e.type==="burst"||e.type==="destruction"){ctx.strokeStyle=e.color;ctx.lineWidth=5;const radius=(e.type==="destruction"?CONFIG.interactions.wallShardRadius:30)*(1-alpha);ctx.beginPath();ctx.arc(e.x,e.y,radius,0,CONFIG.render.pi2);ctx.stroke();if(e.type==="destruction"){for(let i=0;i<CONFIG.effects.particleCount;i++){const a=i*CONFIG.render.pi2/CONFIG.effects.particleCount;ctx.fillRect(e.x+Math.cos(a)*radius-2,e.y+Math.sin(a)*radius-2,4,4);}}}else{ctx.fillStyle=e.color;ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(e.text,e.x,e.y);}ctx.globalAlpha=1;}}
 function renderHud(){const p=gameState.player;ctx.fillStyle="#08101fdd";ctx.fillRect(16,16,470,74);ctx.fillStyle="#fff";ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(`HP ${"♥".repeat(Math.max(0,p.health))}   RETRIES ${p.retries}`,30,44);ctx.font=`${CONFIG.render.fontSmall}px sans-serif`;ctx.fillText("AMMO",30,72);if(!p.ammo.length){ctx.fillStyle="#8995ac";ctx.fillText("EMPTY — defeat enemies",92,72);}p.ammo.forEach((type,i)=>{const x=92+i*72;ctx.fillStyle=ammoColor(type);ctx.fillRect(x,58,14,14);ctx.fillStyle="#fff";ctx.fillText(type[0].toUpperCase(),x+20,71);if(i===p.selectedAmmoIndex)ctx.strokeRect(x-4,54,62,22);});ctx.fillStyle=gameState.collectible.collected?CONFIG.colors.gold:"#8995ac";ctx.fillText(`SECRET ${gameState.collectible.collected?"✓":"○"}`,385,71);}
 function overlay(title, lines, footer, color="#fff"){ctx.fillStyle=`rgba(5,9,20,${CONFIG.render.overlayAlpha})`;ctx.fillRect(0,0,CONFIG.canvas.width,CONFIG.canvas.height);ctx.textAlign="center";ctx.fillStyle=color;ctx.font=`900 ${CONFIG.render.fontLarge}px sans-serif`;ctx.fillText(title,CONFIG.canvas.width/2,145);ctx.font=`${CONFIG.render.fontMedium}px sans-serif`;lines.forEach((line,i)=>ctx.fillText(line,CONFIG.canvas.width/2,215+i*34));ctx.fillStyle=CONFIG.colors.gold;ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(footer,CONFIG.canvas.width/2,410);ctx.textAlign="left";}
-function render(){drawBackground();if(gameState.phase!=="start"&&gameState.player){ctx.save();ctx.translate(-gameState.camera.x,0);renderLevel();renderEnemies();renderProjectiles();renderShards();renderPlayer();renderEffects();ctx.restore();renderHud();}if(gameState.phase==="start")overlay("ELEMENT RUN",["敵を倒して属性弾を獲得。順番を選び、道を切り拓こう。","A / D: 移動    マウス: 照準    左クリック: 発射","右クリック / Space: ジャンプ    ホイール: 弾薬切替"],"左クリック または Enter でスタート",CONFIG.colors.freeze);else if(gameState.phase==="gameover")overlay(gameState.result==="win"?"COURSE CLEAR!":"RUN OVER",[gameState.result==="win"?`秘密のコア: ${gameState.collectible.collected?"獲得!":"未獲得"}`:"リトライを使い切りました",gameState.result==="win"?"全ゾーンを走破しました。":"もう一度コースに挑戦しよう。"],"R または Enter で最初から",gameState.result==="win"?CONFIG.colors.gold:CONFIG.colors.danger);}
+function render(){drawBackground();if(gameState.phase!=="start"&&gameState.player){ctx.save();ctx.translate(-gameState.camera.x,0);renderLevel();renderMovableBoxes();renderEnemies();renderProjectiles();renderShards();renderPlayer();renderEffects();ctx.restore();renderHud();}if(gameState.phase==="start")overlay("ELEMENT RUN",["敵を倒して属性弾を獲得。順番を選び、道を切り拓こう。","A / D: 移動    マウス: 照準    左クリック: 発射","右クリック / Space: ジャンプ    ホイール: 弾薬切替"],"左クリック または Enter でスタート",CONFIG.colors.freeze);else if(gameState.phase==="gameover")overlay(gameState.result==="win"?"COURSE CLEAR!":"RUN OVER",[gameState.result==="win"?`秘密のコア: ${gameState.collectible.collected?"獲得!":"未獲得"}`:"リトライを使い切りました",gameState.result==="win"?"全ゾーンを走破しました。":"もう一度コースに挑戦しよう。"],"R または Enter で最初から",gameState.result==="win"?CONFIG.colors.gold:CONFIG.colors.danger);}
 
 function frame(now){const dt=Math.min(CONFIG.physics.maxDt,(now-gameState.lastFrame)/1000||0);gameState.lastFrame=now;update(dt);render();requestAnimationFrame(frame);}
 function pressStartOrRestart(){if(gameState.phase==="start"||gameState.phase==="gameover")resetGame();}
