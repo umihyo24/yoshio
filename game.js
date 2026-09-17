@@ -8,6 +8,7 @@ const CONFIG = Object.freeze({
   camera: { follow: 5.5, lead: 300 },
   ammo: { types: Object.freeze(["explosion", "bounce", "freeze"]), capacity: 5, orbitRadius: 35, orbitSpeed: 1.8 },
   projectile: { radius: 7, speed: 570, inherit: 0.18, lifetime: 4, damage: 1, bounceCount: 3, restitution: 0.82, explosionRadius: 105, freezeDuration: 5 },
+  shatter: { shardCount: 6, shardSpeed: 360, shardLifetime: 0.7, shardDamage: 1, shardSize: 7, flashDuration: 0.28, flashRadius: 48, flashStartScale: 0.65 },
   enemies: { width: 38, height: 34, health: 1, fireSpeed: 62, iceSpeed: 43, hopSpeed: 310, hopPeriod: 1.7, contactDamage: 1, hitTime: 0.15 },
   interactions: { frozenLandingTolerance: 8, thawWarning: 1, thawLiftSpeed: 120, wallShardRadius: 34, switchPulseSpeed: 5, collectiblePulseSpeed: 4, collectiblePulseAmount: 3 },
   effects: { defaultLife: 0.65, explosionLife: 0.38, destructionLife: 0.7, messageLife: 1.5, particleCount: 10 },
@@ -29,7 +30,7 @@ const ctx = canvas.getContext("2d");
 const gameState = {
   phase: "start", result: null, time: 0, lastFrame: 0,
   camera: { x: 0 }, input: { keys: {}, pressed: {}, mouse: { x: 700, y: 280, down: false, jumpDown: false }, jump: { pressed: false, held: false, released: false } },
-  player: null, platforms: [], slopes: [], enemies: [], projectiles: [], effects: [],
+  player: null, platforms: [], slopes: [], enemies: [], projectiles: [], shards: [], effects: [],
   wall: null, switch: null, door: null, checkpoint: null, goal: null,
   collectible: { x: 1370, y: 342, radius: 13, collected: false }, assets: {}
 };
@@ -50,7 +51,8 @@ function buildLevel() {
   gameState.slopes = [{ x: 2380, y: f, w: 240, h: 100, direction: 1 }];
   gameState.enemies = [
     makeEnemy("fire", 760, 446, 650, 850), makeEnemy("slime", 1160, 446, 1010, 1450), makeEnemy("ice", 2080, 446, 1900, 2300),
-    makeEnemy("fire", 3650, 446, 3580, 3880), makeEnemy("slime", 4100, 446, 3900, 4300), makeEnemy("ice", 4560, 446, 4400, 4800)
+    makeEnemy("fire", 3650, 446, 3600, 3670), makeEnemy("slime", 3725, 446, 3700, 3755), makeEnemy("ice", 3800, 446, 3780, 3840),
+    makeEnemy("slime", 4100, 446, 3900, 4300), makeEnemy("ice", 4560, 446, 4400, 4800)
   ];
   gameState.wall = rect(1280, 270, 42, 210, "destructible");
   gameState.switch = { x: 2190, y: 220, w: 28, h: 28, active: false };
@@ -68,7 +70,7 @@ function createStartingAmmo() {
 function resetGame() {
   buildLevel();
   gameState.phase = "playing"; gameState.result = null; gameState.time = 0; gameState.camera.x = 0;
-  gameState.projectiles = []; gameState.effects = [];
+  gameState.projectiles = []; gameState.shards = []; gameState.effects = [];
   gameState.player = { x: CONFIG.player.startX, y: CONFIG.player.startY, w: CONFIG.player.width, h: CONFIG.player.height, vx: 0, vy: 0, grounded: false, health: CONFIG.player.health, retries: CONFIG.player.retries, invulnerable: 0, cooldown: 0, ammo: createStartingAmmo(), selectedAmmoIndex: 0, respawn: { x: CONFIG.player.startX, y: CONFIG.player.startY }, emptyFlash: 0, wallContact: { left: false, right: false }, isWallSliding: false, wallJumpLockTimer: 0, wallJumpBlockedSide: null, wallDetachTimer: 0 };
   clearGameplayInput();
 }
@@ -104,10 +106,31 @@ function grantAmmo(enemy) {
   if (ammo && gameState.player.ammo.length < CONFIG.ammo.capacity) { gameState.player.ammo.push(ammo); clampAmmoIndex(); addEffect("text", enemy.x, enemy.y, ammoColor(ammo), CONFIG.effects.messageLife, `+ ${ammo.toUpperCase()}`); }
   else addEffect("text", enemy.x, enemy.y, CONFIG.colors.danger, CONFIG.effects.messageLife, "AMMO FULL");
 }
+function defeatEnemy(enemy) {
+  if (!enemy?.alive) return false;
+  enemy.alive = false; enemy.frozen = 0;
+  grantAmmo(enemy);
+  addEffect("burst", enemy.x + enemy.w/2, enemy.y + enemy.h/2, ammoColor({fire:"explosion",slime:"bounce",ice:"freeze"}[enemy.type]));
+  return true;
+}
 function damageEnemy(enemy, amount, freeze = false) {
   if (!enemy?.alive) return; enemy.hp -= amount; enemy.hit = CONFIG.enemies.hitTime;
   if (freeze && enemy.hp > 0) { enemy.frozen = CONFIG.projectile.freezeDuration; enemy.vx = 0; enemy.vy = 0; }
-  if (enemy.hp <= 0) { enemy.alive = false; grantAmmo(enemy); addEffect("burst", enemy.x + enemy.w/2, enemy.y + enemy.h/2, ammoColor({fire:"explosion",slime:"bounce",ice:"freeze"}[enemy.type])); }
+  if (enemy.hp <= 0) defeatEnemy(enemy);
+}
+function triggerShatter(enemy) {
+  if (!enemy?.alive || !(enemy.frozen > 0)) return false;
+  const x = enemy.x + enemy.w/2, y = enemy.y + enemy.h/2;
+  const player = gameState.player;
+  if (player?.frozenSupport === enemy) { player.frozenSupport = null; player.grounded = false; }
+  enemy.frozen = 0;
+  if (!defeatEnemy(enemy)) return false;
+  addEffect("shatter", x, y, CONFIG.colors.freeze, CONFIG.shatter.flashDuration);
+  for (let index = 0; index < CONFIG.shatter.shardCount; index++) {
+    const angle = index * CONFIG.render.pi2 / CONFIG.shatter.shardCount;
+    gameState.shards.push({ x, y, radius: CONFIG.shatter.shardSize, vx: Math.cos(angle) * CONFIG.shatter.shardSpeed, vy: Math.sin(angle) * CONFIG.shatter.shardSpeed, angle, life: CONFIG.shatter.shardLifetime, alive: true, source: enemy });
+  }
+  return true;
 }
 function ammoColor(type) { return CONFIG.colors[type] || CONFIG.colors.gold; }
 
@@ -223,7 +246,7 @@ function damagePlayer(amount, direction) {
 }
 function killPlayer() {
   const p = gameState.player; if (p.retries <= 0) { finish("lose"); return; }
-  p.retries -= 1; p.health = CONFIG.player.health; p.x = p.respawn.x; p.y = p.respawn.y; p.vx = 0; p.vy = 0; p.grounded = false; p.wallContact = { left: false, right: false }; p.isWallSliding = false; p.wallJumpLockTimer = 0; p.wallJumpBlockedSide = null; p.wallDetachTimer = 0; p.invulnerable = CONFIG.player.invulnerability; gameState.projectiles = []; clearGameplayInput();
+  p.retries -= 1; p.health = CONFIG.player.health; p.x = p.respawn.x; p.y = p.respawn.y; p.vx = 0; p.vy = 0; p.grounded = false; p.wallContact = { left: false, right: false }; p.isWallSliding = false; p.wallJumpLockTimer = 0; p.wallJumpBlockedSide = null; p.wallDetachTimer = 0; p.invulnerable = CONFIG.player.invulnerability; gameState.projectiles = []; gameState.shards = []; clearGameplayInput();
   addEffect("text", p.x, p.y, CONFIG.colors.gold, CONFIG.effects.messageLife, `RESPAWN • ${p.retries} RETRIES`);
 }
 function activateCheckpoint() {
@@ -266,7 +289,7 @@ function projectileSolidHit(p) {
 }
 function explode(p) {
   p.alive = false; const hit = new Set();
-  for (const e of gameState.enemies) if (e.alive) { const dx=e.x+e.w/2-p.x, dy=e.y+e.h/2-p.y; if (dx*dx+dy*dy <= CONFIG.projectile.explosionRadius**2 && !hit.has(e)) { hit.add(e); damageEnemy(e, CONFIG.projectile.damage); } }
+  for (const e of gameState.enemies) if (e.alive) { const dx=e.x+e.w/2-p.x, dy=e.y+e.h/2-p.y; if (dx*dx+dy*dy <= CONFIG.projectile.explosionRadius**2 && !hit.has(e)) { hit.add(e); if (!triggerShatter(e)) damageEnemy(e, CONFIG.projectile.damage); } }
   if (gameState.wall?.active && circleRect({ x:p.x, y:p.y, radius:CONFIG.projectile.explosionRadius }, gameState.wall)) {
     const cx=gameState.wall.x+gameState.wall.w/2, cy=gameState.wall.y+gameState.wall.h/2;
     gameState.wall.active=false;
@@ -276,6 +299,17 @@ function explode(p) {
   const pl=gameState.player, dx=pl.x+pl.w/2-p.x, dy=pl.y+pl.h/2-p.y, d=Math.hypot(dx,dy);
   if (d < CONFIG.projectile.explosionRadius && d > CONFIG.physics.epsilon) { const force=CONFIG.player.knockback*(1-d/CONFIG.projectile.explosionRadius); pl.vx += dx/d*force; pl.vy += dy/d*force; }
   addEffect("explosion", p.x, p.y, CONFIG.colors.explosion, CONFIG.effects.explosionLife);
+}
+function updateShards(dt) {
+  for (const shard of gameState.shards) {
+    if (!shard.alive || !validEntity(shard)) continue;
+    shard.life -= dt; shard.x += shard.vx * dt; shard.y += shard.vy * dt;
+    if (shard.life <= 0 || shard.x < 0 || shard.x > CONFIG.level.width || shard.y > CONFIG.level.killY || projectileSolidHit(shard)) { shard.alive = false; continue; }
+    for (const enemy of gameState.enemies) {
+      if (!enemy?.alive || enemy === shard.source || !circleRect(shard, enemy)) continue;
+      damageEnemy(enemy, CONFIG.shatter.shardDamage); shard.alive = false; break;
+    }
+  }
 }
 function updateProjectiles(dt) {
   for (const p of gameState.projectiles) {
@@ -293,11 +327,11 @@ function updateProjectiles(dt) {
   }
 }
 function updateEffects(dt) { for (const e of gameState.effects) { e.life -= dt; if (e.type === "text") e.y -= CONFIG.render.fontMedium * dt; } }
-function cleanup() { gameState.projectiles = gameState.projectiles.filter(p => p.alive && p.life > 0 && validEntity(p)); gameState.effects = gameState.effects.filter(e => e.life > 0 && validEntity(e)); gameState.enemies = gameState.enemies.filter(e => e.alive && validEntity(e)); }
+function cleanup() { gameState.projectiles = gameState.projectiles.filter(p => p.alive && p.life > 0 && validEntity(p)); gameState.shards = gameState.shards.filter(s => s.alive && s.life > 0 && validEntity(s)); gameState.effects = gameState.effects.filter(e => e.life > 0 && validEntity(e)); gameState.enemies = gameState.enemies.filter(e => e.alive && validEntity(e)); }
 function updateCamera(dt) { const target=Math.max(0,Math.min(CONFIG.level.width-CONFIG.canvas.width,gameState.player.x-CONFIG.camera.lead)); gameState.camera.x += (target-gameState.camera.x)*Math.min(1,CONFIG.camera.follow*dt); }
 function finish(result) { gameState.phase="gameover"; gameState.result=result; clearGameplayInput(); }
 function update(dt) {
-  if (gameState.phase !== "playing") return; gameState.time += dt; updateInput(dt); updatePlayer(dt); updateEnemies(dt); updateProjectiles(dt); updateEffects(dt); cleanup(); updateCamera(dt); gameState.input.pressed = {};
+  if (gameState.phase !== "playing") return; gameState.time += dt; updateInput(dt); updatePlayer(dt); updateEnemies(dt); updateProjectiles(dt); updateShards(dt); updateEffects(dt); cleanup(); updateCamera(dt); gameState.input.pressed = {};
 }
 
 function drawWorldRect(r, fill, stroke=CONFIG.colors.edge) { if (!r?.active) return; ctx.fillStyle=fill; ctx.fillRect(r.x,r.y,r.w,r.h); ctx.strokeStyle=stroke; ctx.strokeRect(r.x+.5,r.y+.5,r.w-1,r.h-1); }
@@ -318,13 +352,14 @@ function renderLevel() {
 }
 function renderEnemies() { for(const e of gameState.enemies){ctx.save();if(e.hit>0)ctx.globalAlpha=.45;ctx.fillStyle=e.frozen>0?CONFIG.colors.freeze:e.type==="fire"?CONFIG.colors.explosion:e.type==="slime"?CONFIG.colors.bounce:"#9abfff";ctx.fillRect(e.x,e.y,e.w,e.h);ctx.strokeStyle=e.frozen>0?"#fff":"#1b2034";ctx.lineWidth=e.frozen>0?4:2;ctx.strokeRect(e.x,e.y,e.w,e.h);if(e.frozen>0){ctx.fillStyle="#dff8ff";ctx.fillRect(e.x-3,e.y-5,e.w+6,5);if(e.frozen<=CONFIG.interactions.thawWarning){ctx.globalAlpha=.45+.35*Math.sin(gameState.time*CONFIG.interactions.switchPulseSpeed);ctx.fillStyle="#fff";ctx.fillRect(e.x,e.y,e.w,e.h);}}ctx.fillStyle="#172033";ctx.fillRect(e.x+8,e.y+10,5,5);ctx.fillRect(e.x+25,e.y+10,5,5);ctx.restore();} }
 function renderProjectiles(){for(const p of gameState.projectiles){ctx.strokeStyle=ammoColor(p.type);ctx.globalAlpha=.25;ctx.beginPath();for(const t of p.trail)ctx.lineTo(t.x,t.y);ctx.stroke();ctx.globalAlpha=1;ctx.fillStyle=ammoColor(p.type);ctx.beginPath();ctx.arc(p.x,p.y,p.radius,0,CONFIG.render.pi2);ctx.fill();ctx.strokeStyle="#fff";ctx.stroke();}}
+function renderShards(){for(const shard of gameState.shards){ctx.save();ctx.translate(shard.x,shard.y);ctx.rotate(shard.angle);ctx.fillStyle="#dff8ff";ctx.strokeStyle=CONFIG.colors.freeze;ctx.beginPath();ctx.moveTo(CONFIG.shatter.shardSize,0);ctx.lineTo(0,CONFIG.shatter.shardSize/2);ctx.lineTo(-CONFIG.shatter.shardSize,0);ctx.lineTo(0,-CONFIG.shatter.shardSize/2);ctx.closePath();ctx.fill();ctx.stroke();ctx.restore();}}
 function renderPlayer(){const p=gameState.player;if(!p)return;const blink=p.invulnerable>0&&Math.floor(gameState.time*CONFIG.render.playerBlinkRate)%2;ctx.globalAlpha=blink?.35:1;ctx.fillStyle=p.emptyFlash>0?CONFIG.colors.danger:CONFIG.colors.player;ctx.fillRect(p.x,p.y,p.w,p.h);ctx.fillStyle="#26334e";ctx.fillRect(p.x+17,p.y+9,6,6);ctx.globalAlpha=1;
   const mx=gameState.input.mouse.x+gameState.camera.x,my=gameState.input.mouse.y,a=Math.atan2(my-(p.y+p.h/2),mx-(p.x+p.w/2));ctx.strokeStyle="#d9efff";ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(p.x+p.w/2,p.y+p.h/2);ctx.lineTo(p.x+p.w/2+Math.cos(a)*28,p.y+p.h/2+Math.sin(a)*28);ctx.stroke();
   p.ammo.forEach((type,index)=>{const ang=gameState.time*CONFIG.ammo.orbitSpeed+index*CONFIG.render.pi2/p.ammo.length,selected=index===p.selectedAmmoIndex,r=selected?8:5;ctx.fillStyle=ammoColor(type);ctx.beginPath();ctx.arc(p.x+p.w/2+Math.cos(ang)*CONFIG.ammo.orbitRadius,p.y+p.h/2+Math.sin(ang)*CONFIG.ammo.orbitRadius,r,0,CONFIG.render.pi2);ctx.fill();if(selected){ctx.strokeStyle="#fff";ctx.lineWidth=2;ctx.stroke();}});}
-function renderEffects(){for(const e of gameState.effects){const alpha=Math.max(0,e.life/e.maxLife);ctx.globalAlpha=alpha;if(e.type==="explosion"){ctx.fillStyle=e.color;ctx.beginPath();ctx.arc(e.x,e.y,CONFIG.projectile.explosionRadius*(1-alpha*.4),0,CONFIG.render.pi2);ctx.fill();}else if(e.type==="burst"||e.type==="destruction"){ctx.strokeStyle=e.color;ctx.lineWidth=5;const radius=(e.type==="destruction"?CONFIG.interactions.wallShardRadius:30)*(1-alpha);ctx.beginPath();ctx.arc(e.x,e.y,radius,0,CONFIG.render.pi2);ctx.stroke();if(e.type==="destruction"){for(let i=0;i<CONFIG.effects.particleCount;i++){const a=i*CONFIG.render.pi2/CONFIG.effects.particleCount;ctx.fillRect(e.x+Math.cos(a)*radius-2,e.y+Math.sin(a)*radius-2,4,4);}}}else{ctx.fillStyle=e.color;ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(e.text,e.x,e.y);}ctx.globalAlpha=1;}}
+function renderEffects(){for(const e of gameState.effects){const alpha=Math.max(0,e.life/e.maxLife);ctx.globalAlpha=alpha;if(e.type==="explosion"||e.type==="shatter"){ctx.fillStyle=e.color;ctx.beginPath();ctx.arc(e.x,e.y,e.type==="shatter"?CONFIG.shatter.flashRadius*(1-alpha*(1-CONFIG.shatter.flashStartScale)):CONFIG.projectile.explosionRadius*(1-alpha*.4),0,CONFIG.render.pi2);ctx.fill();}else if(e.type==="burst"||e.type==="destruction"){ctx.strokeStyle=e.color;ctx.lineWidth=5;const radius=(e.type==="destruction"?CONFIG.interactions.wallShardRadius:30)*(1-alpha);ctx.beginPath();ctx.arc(e.x,e.y,radius,0,CONFIG.render.pi2);ctx.stroke();if(e.type==="destruction"){for(let i=0;i<CONFIG.effects.particleCount;i++){const a=i*CONFIG.render.pi2/CONFIG.effects.particleCount;ctx.fillRect(e.x+Math.cos(a)*radius-2,e.y+Math.sin(a)*radius-2,4,4);}}}else{ctx.fillStyle=e.color;ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(e.text,e.x,e.y);}ctx.globalAlpha=1;}}
 function renderHud(){const p=gameState.player;ctx.fillStyle="#08101fdd";ctx.fillRect(16,16,470,74);ctx.fillStyle="#fff";ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(`HP ${"♥".repeat(Math.max(0,p.health))}   RETRIES ${p.retries}`,30,44);ctx.font=`${CONFIG.render.fontSmall}px sans-serif`;ctx.fillText("AMMO",30,72);if(!p.ammo.length){ctx.fillStyle="#8995ac";ctx.fillText("EMPTY — defeat enemies",92,72);}p.ammo.forEach((type,i)=>{const x=92+i*72;ctx.fillStyle=ammoColor(type);ctx.fillRect(x,58,14,14);ctx.fillStyle="#fff";ctx.fillText(type[0].toUpperCase(),x+20,71);if(i===p.selectedAmmoIndex)ctx.strokeRect(x-4,54,62,22);});ctx.fillStyle=gameState.collectible.collected?CONFIG.colors.gold:"#8995ac";ctx.fillText(`SECRET ${gameState.collectible.collected?"✓":"○"}`,385,71);}
 function overlay(title, lines, footer, color="#fff"){ctx.fillStyle=`rgba(5,9,20,${CONFIG.render.overlayAlpha})`;ctx.fillRect(0,0,CONFIG.canvas.width,CONFIG.canvas.height);ctx.textAlign="center";ctx.fillStyle=color;ctx.font=`900 ${CONFIG.render.fontLarge}px sans-serif`;ctx.fillText(title,CONFIG.canvas.width/2,145);ctx.font=`${CONFIG.render.fontMedium}px sans-serif`;lines.forEach((line,i)=>ctx.fillText(line,CONFIG.canvas.width/2,215+i*34));ctx.fillStyle=CONFIG.colors.gold;ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(footer,CONFIG.canvas.width/2,410);ctx.textAlign="left";}
-function render(){drawBackground();if(gameState.phase!=="start"&&gameState.player){ctx.save();ctx.translate(-gameState.camera.x,0);renderLevel();renderEnemies();renderProjectiles();renderPlayer();renderEffects();ctx.restore();renderHud();}if(gameState.phase==="start")overlay("ELEMENT RUN",["敵を倒して属性弾を獲得。順番を選び、道を切り拓こう。","A / D: 移動    マウス: 照準    左クリック: 発射","右クリック / Space: ジャンプ    ホイール: 弾薬切替"],"左クリック または Enter でスタート",CONFIG.colors.freeze);else if(gameState.phase==="gameover")overlay(gameState.result==="win"?"COURSE CLEAR!":"RUN OVER",[gameState.result==="win"?`秘密のコア: ${gameState.collectible.collected?"獲得!":"未獲得"}`:"リトライを使い切りました",gameState.result==="win"?"全ゾーンを走破しました。":"もう一度コースに挑戦しよう。"],"R または Enter で最初から",gameState.result==="win"?CONFIG.colors.gold:CONFIG.colors.danger);}
+function render(){drawBackground();if(gameState.phase!=="start"&&gameState.player){ctx.save();ctx.translate(-gameState.camera.x,0);renderLevel();renderEnemies();renderProjectiles();renderShards();renderPlayer();renderEffects();ctx.restore();renderHud();}if(gameState.phase==="start")overlay("ELEMENT RUN",["敵を倒して属性弾を獲得。順番を選び、道を切り拓こう。","A / D: 移動    マウス: 照準    左クリック: 発射","右クリック / Space: ジャンプ    ホイール: 弾薬切替"],"左クリック または Enter でスタート",CONFIG.colors.freeze);else if(gameState.phase==="gameover")overlay(gameState.result==="win"?"COURSE CLEAR!":"RUN OVER",[gameState.result==="win"?`秘密のコア: ${gameState.collectible.collected?"獲得!":"未獲得"}`:"リトライを使い切りました",gameState.result==="win"?"全ゾーンを走破しました。":"もう一度コースに挑戦しよう。"],"R または Enter で最初から",gameState.result==="win"?CONFIG.colors.gold:CONFIG.colors.danger);}
 
 function frame(now){const dt=Math.min(CONFIG.physics.maxDt,(now-gameState.lastFrame)/1000||0);gameState.lastFrame=now;update(dt);render();requestAnimationFrame(frame);}
 function pressStartOrRestart(){if(gameState.phase==="start"||gameState.phase==="gameover")resetGame();}
