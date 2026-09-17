@@ -4,9 +4,9 @@
 const CONFIG = Object.freeze({
   canvas: { width: 960, height: 540 },
   physics: { gravity: 1800, maxFall: 900, epsilon: 0.01, maxDt: 0.033 },
-  player: { width: 30, height: 42, startX: 90, startY: 420, accel: 1900, airAccel: 1050, decel: 2200, maxSpeed: 270, jump: 610, jumpCut: 0.48, health: 4, invulnerability: 1.1, retries: 2, shotCooldown: 0.18, knockback: 560, wallSlideMaxFallSpeed: 155, wallJumpHorizontalSpeed: 145, wallJumpVerticalSpeed: 610, wallContactTolerance: 2, wallJumpControlLockDuration: 0.035, wallRecontactDuration: 0.05 },
+  player: { width: 30, height: 42, startX: 90, startY: 420, accel: 1900, airAccel: 1050, decel: 2200, maxSpeed: 270, jump: 610, jumpCut: 0.48, health: 4, invulnerability: 1.1, retries: 2, shotCooldown: 0.18, knockback: 560, wallSlideMaxFallSpeed: 155, wallJumpHorizontalSpeed: 145, wallJumpVerticalSpeed: 610, wallContactTolerance: 2, wallJumpControlLockDuration: 0.035, wallRecontactDuration: 0.05, startingAmmo: Object.freeze(["explosion", "bounce", "freeze"]) },
   camera: { follow: 5.5, lead: 300 },
-  ammo: { capacity: 5, orbitRadius: 35, orbitSpeed: 1.8 },
+  ammo: { types: Object.freeze(["explosion", "bounce", "freeze"]), capacity: 5, orbitRadius: 35, orbitSpeed: 1.8 },
   projectile: { radius: 7, speed: 570, inherit: 0.18, lifetime: 4, damage: 1, bounceCount: 3, restitution: 0.82, explosionRadius: 105, freezeDuration: 5 },
   enemies: { width: 38, height: 34, health: 1, fireSpeed: 62, iceSpeed: 43, hopSpeed: 310, hopPeriod: 1.7, contactDamage: 1, hitTime: 0.15 },
   effects: { defaultLife: 0.65, explosionLife: 0.38, messageLife: 1.5, particleCount: 10 },
@@ -58,11 +58,17 @@ function buildLevel() {
   gameState.goal = { x: CONFIG.level.goalX, y: CONFIG.level.floorY - CONFIG.level.goalHeight, w: CONFIG.level.goalWidth, h: CONFIG.level.goalHeight };
   gameState.collectible = { x: 1370, y: 342, radius: 13, collected: false };
 }
+function createStartingAmmo() {
+  const configuredAmmo = Array.isArray(CONFIG.player.startingAmmo) ? CONFIG.player.startingAmmo : [];
+  const validTypes = new Set(Array.isArray(CONFIG.ammo.types) ? CONFIG.ammo.types : []);
+  const capacity = Number.isFinite(CONFIG.ammo.capacity) ? Math.max(0, Math.floor(CONFIG.ammo.capacity)) : 0;
+  return configuredAmmo.filter(type => validTypes.has(type)).slice(0, capacity);
+}
 function resetGame() {
   buildLevel();
   gameState.phase = "playing"; gameState.result = null; gameState.time = 0; gameState.camera.x = 0;
   gameState.projectiles = []; gameState.effects = [];
-  gameState.player = { x: CONFIG.player.startX, y: CONFIG.player.startY, w: CONFIG.player.width, h: CONFIG.player.height, vx: 0, vy: 0, grounded: false, health: CONFIG.player.health, retries: CONFIG.player.retries, invulnerable: 0, cooldown: 0, ammo: [], selectedAmmoIndex: 0, respawn: { x: CONFIG.player.startX, y: CONFIG.player.startY }, emptyFlash: 0, wallContact: { left: false, right: false }, isWallSliding: false, wallJumpLockTimer: 0, wallJumpBlockedSide: null, wallDetachTimer: 0 };
+  gameState.player = { x: CONFIG.player.startX, y: CONFIG.player.startY, w: CONFIG.player.width, h: CONFIG.player.height, vx: 0, vy: 0, grounded: false, health: CONFIG.player.health, retries: CONFIG.player.retries, invulnerable: 0, cooldown: 0, ammo: createStartingAmmo(), selectedAmmoIndex: 0, respawn: { x: CONFIG.player.startX, y: CONFIG.player.startY }, emptyFlash: 0, wallContact: { left: false, right: false }, isWallSliding: false, wallJumpLockTimer: 0, wallJumpBlockedSide: null, wallDetachTimer: 0 };
   clearGameplayInput();
 }
 
