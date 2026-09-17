@@ -6,7 +6,8 @@ const CONFIG = Object.freeze({
   physics: { gravity: 1800, maxFall: 900, epsilon: 0.01, maxDt: 0.033 },
   player: { width: 30, height: 42, startX: 90, startY: 420, accel: 1900, airAccel: 1050, decel: 2200, maxSpeed: 270, jump: 610, jumpCut: 0.48, health: 4, invulnerability: 1.1, retries: 2, shotCooldown: 0.18, knockback: 560, wallSlideMaxFallSpeed: 155, wallJumpHorizontalSpeed: 145, wallJumpVerticalSpeed: 610, wallContactTolerance: 2, wallJumpControlLockDuration: 0.035, wallRecontactDuration: 0.05, startingAmmo: Object.freeze(["explosion", "bounce", "freeze"]) },
   camera: { follow: 5.5, lead: 300 },
-  ammo: { types: Object.freeze(["explosion", "bounce", "freeze"]), capacity: 5, orbitRadius: 35, orbitSpeed: 1.8 },
+  ammo: { types: Object.freeze(["explosion", "bounce", "freeze"]), capacity: 5, followerSpacing: 18, followerLift: 10 },
+  conveyor: { speed: 95, contactTolerance: 2, visualStripeSpacing: 28, visualScrollSpeed: 70 },
   projectile: { radius: 7, speed: 570, inherit: 0.18, lifetime: 4, damage: 1, bounceCount: 3, restitution: 0.82, explosionRadius: 105, freezeDuration: 5 },
   shatter: { shardCount: 6, shardSpeed: 360, shardLifetime: 0.7, shardDamage: 1, shardSize: 7, flashDuration: 0.28, flashRadius: 48, flashStartScale: 0.65 },
   enemies: { width: 38, height: 34, health: 1, fireSpeed: 62, iceSpeed: 43, hopSpeed: 310, hopPeriod: 1.7, contactDamage: 1, hitTime: 0.15 },
@@ -30,12 +31,13 @@ const ctx = canvas.getContext("2d");
 const gameState = {
   phase: "start", result: null, time: 0, lastFrame: 0,
   camera: { x: 0 }, input: { keys: {}, pressed: {}, mouse: { x: 700, y: 280, down: false, jumpDown: false }, jump: { pressed: false, held: false, released: false } },
-  player: null, platforms: [], slopes: [], enemies: [], projectiles: [], shards: [], effects: [],
+  player: null, platforms: [], conveyors: [], slopes: [], enemies: [], projectiles: [], shards: [], effects: [],
   wall: null, switch: null, door: null, checkpoint: null, goal: null,
   collectible: { x: 1370, y: 342, radius: 13, collected: false }, assets: {}
 };
 
 function rect(x, y, w, h, kind = "solid") { return { x, y, w, h, kind, active: true }; }
+function conveyor(x, y, w, h, direction) { return { x, y, w, h, kind: "conveyor", direction: Math.sign(direction) || 1, active: true }; }
 function makeEnemy(type, x, y, minX, maxX) {
   return { type, x, y, w: CONFIG.enemies.width, h: CONFIG.enemies.height, vx: type === "ice" ? CONFIG.enemies.iceSpeed : CONFIG.enemies.fireSpeed, vy: 0, minX, maxX, hp: CONFIG.enemies.health, frozen: 0, hit: 0, hopClock: 0, alive: true, dropGranted: false, grounded: false };
 }
@@ -48,6 +50,9 @@ function buildLevel() {
     rect(3300, 355, 180, 20, "platform"), rect(3700, 395, 170, 20, "platform"), rect(3970, 325, 170, 20, "platform"), rect(4300, 390, 170, 20, "platform"), rect(4630, 315, 180, 20, "platform"),
     rect(1600, 270, 35, 210), rect(1690, 350, 30, 130), rect(2240, 185, 35, 115)
   ];
+  // Static environment data. The late right belt and ledge form an optional
+  // freeze-and-ride route; neither belt blocks the ordinary floor route.
+  gameState.conveyors = [conveyor(1840, f, 290, 80, -1), conveyor(3890, f, 390, 80, 1)];
   gameState.slopes = [{ x: 2380, y: f, w: 240, h: 100, direction: 1 }];
   gameState.enemies = [
     makeEnemy("fire", 760, 446, 650, 850), makeEnemy("slime", 1160, 446, 1010, 1450), makeEnemy("ice", 2080, 446, 1900, 2300),
@@ -71,7 +76,7 @@ function resetGame() {
   buildLevel();
   gameState.phase = "playing"; gameState.result = null; gameState.time = 0; gameState.camera.x = 0;
   gameState.projectiles = []; gameState.shards = []; gameState.effects = [];
-  gameState.player = { x: CONFIG.player.startX, y: CONFIG.player.startY, w: CONFIG.player.width, h: CONFIG.player.height, vx: 0, vy: 0, grounded: false, health: CONFIG.player.health, retries: CONFIG.player.retries, invulnerable: 0, cooldown: 0, ammo: createStartingAmmo(), selectedAmmoIndex: 0, respawn: { x: CONFIG.player.startX, y: CONFIG.player.startY }, emptyFlash: 0, wallContact: { left: false, right: false }, isWallSliding: false, wallJumpLockTimer: 0, wallJumpBlockedSide: null, wallDetachTimer: 0 };
+  gameState.player = { x: CONFIG.player.startX, y: CONFIG.player.startY, w: CONFIG.player.width, h: CONFIG.player.height, vx: 0, vy: 0, grounded: false, supportSurface: null, frozenSupport: null, health: CONFIG.player.health, retries: CONFIG.player.retries, invulnerable: 0, cooldown: 0, ammo: createStartingAmmo(), selectedAmmoIndex: 0, respawn: { x: CONFIG.player.startX, y: CONFIG.player.startY }, emptyFlash: 0, wallContact: { left: false, right: false }, isWallSliding: false, wallJumpLockTimer: 0, wallJumpBlockedSide: null, wallDetachTimer: 0 };
   clearGameplayInput();
 }
 
@@ -85,7 +90,8 @@ function overlap(a, b) { return Boolean(a && b && a.x < b.x + b.w && a.x + a.w >
 function circleRect(c, r) { const x = Math.max(r.x, Math.min(c.x, r.x + r.w)); const y = Math.max(r.y, Math.min(c.y, r.y + r.h)); return (c.x-x)**2 + (c.y-y)**2 <= c.radius**2; }
 function validEntity(e) { return e && Number.isFinite(e.x) && Number.isFinite(e.y); }
 function solids(includeFrozen = false) {
-  const list = gameState.platforms.filter(p => p.active);
+  // Belts precede overlapping base floor so their top is recorded as support.
+  const list = gameState.conveyors.filter(p => p.active).concat(gameState.platforms.filter(p => p.active));
   if (gameState.wall?.active) list.push(gameState.wall);
   if (gameState.door?.active && !gameState.switch?.active) list.push(gameState.door);
   if (includeFrozen) for (const e of gameState.enemies) if (e.alive && e.frozen > 0) list.push(e);
@@ -108,6 +114,8 @@ function grantAmmo(enemy) {
 }
 function defeatEnemy(enemy) {
   if (!enemy?.alive) return false;
+  const player = gameState.player;
+  if (player?.frozenSupport === enemy) { player.frozenSupport = null; player.supportSurface = null; player.grounded = false; }
   enemy.alive = false; enemy.frozen = 0;
   grantAmmo(enemy);
   addEffect("burst", enemy.x + enemy.w/2, enemy.y + enemy.h/2, ammoColor({fire:"explosion",slime:"bounce",ice:"freeze"}[enemy.type]));
@@ -134,12 +142,38 @@ function triggerShatter(enemy) {
 }
 function ammoColor(type) { return CONFIG.colors[type] || CONFIG.colors.gold; }
 
+function validTopSupport(body, support) {
+  if (!body?.grounded || !support || support.active === false) return false;
+  const tolerance = CONFIG.conveyor.contactTolerance;
+  return body.x + body.w > support.x && body.x < support.x + support.w && Math.abs(body.y + body.h - support.y) <= tolerance;
+}
+function conveyorVelocity(body) {
+  return validTopSupport(body, body.supportSurface) && body.supportSurface.kind === "conveyor"
+    ? body.supportSurface.direction * CONFIG.conveyor.speed : 0;
+}
+function moveBodyHorizontal(body, amount, extraSolids = false) {
+  if (!amount) return 0;
+  const start = body.x;
+  body.x += amount;
+  for (const s of solids(extraSolids)) if (s !== body && overlap(body, s)) {
+    if (amount > 0) body.x = Math.min(body.x, s.x - body.w);
+    else body.x = Math.max(body.x, s.x + s.w);
+  }
+  return body.x - start;
+}
 function resolveBody(body, dt, extraSolids = true) {
-  body.x += body.vx * dt;
-  for (const s of solids(extraSolids)) if (overlap(body, s)) { if (body.vx > 0) body.x = s.x - body.w; else if (body.vx < 0) body.x = s.x + s.w; body.vx = 0; }
+  if (!body.grounded) {
+    const resting = solids(extraSolids).find(s => s !== body && body.x + body.w > s.x && body.x < s.x + s.w && Math.abs(body.y + body.h - s.y) <= CONFIG.conveyor.contactTolerance);
+    if (resting) { body.grounded = true; body.supportSurface = resting; }
+  }
+  const ownDx = body.vx * dt;
+  const surfaceDx = conveyorVelocity(body) * dt;
+  const moved = moveBodyHorizontal(body, ownDx + surfaceDx, extraSolids);
+  if (Math.abs(moved - (ownDx + surfaceDx)) > CONFIG.physics.epsilon && Math.sign(body.vx) === Math.sign(ownDx + surfaceDx)) body.vx = 0;
   body.y += body.vy * dt; body.grounded = false;
+  body.supportSurface = null;
   for (const s of solids(extraSolids)) if (overlap(body, s)) {
-    if (body.vy > 0) { body.y = s.y - body.h; body.grounded = true; } else if (body.vy < 0) body.y = s.y + s.h;
+    if (body.vy > 0) { body.y = s.y - body.h; body.grounded = true; body.supportSurface = s; } else if (body.vy < 0) body.y = s.y + s.h;
     body.vy = 0;
   }
   // Stable stepped slope surface; other collision remains axis-aligned.
@@ -147,8 +181,12 @@ function resolveBody(body, dt, extraSolids = true) {
     const center = body.x + body.w/2;
     if (center >= slope.x && center <= slope.x + slope.w && body.vy >= 0) {
       const surface = slope.y - slope.h * ((center - slope.x) / slope.w);
-      if (body.y + body.h >= surface && body.y + body.h <= slope.y + body.h) { body.y = surface - body.h; body.vy = 0; body.grounded = true; }
+      if (body.y + body.h >= surface && body.y + body.h <= slope.y + body.h) { body.y = surface - body.h; body.vy = 0; body.grounded = true; body.supportSurface = slope; }
     }
+  }
+  if (!body.grounded) {
+    const resting = solids(extraSolids).find(s => s !== body && body.x + body.w > s.x && body.x < s.x + s.w && Math.abs(body.y + body.h - s.y) <= CONFIG.conveyor.contactTolerance);
+    if (resting) { body.grounded = true; body.supportSurface = resting; }
   }
 }
 
@@ -186,6 +224,12 @@ function updateWallRecontact(p, dt) {
 }
 function updatePlayer(dt) {
   const p = gameState.player, i = gameState.input; if (!p) return;
+  const riding = p.frozenSupport;
+  if (riding?.alive && riding.frozen > 0 && Number.isFinite(riding.surfaceDeltaX) && validTopSupport(p, riding)) {
+    moveBodyHorizontal(p, riding.surfaceDeltaX, false);
+  } else if (riding && (!riding.alive || riding.frozen <= 0)) {
+    p.frozenSupport = null; p.grounded = false;
+  }
   p.wallContact = detectWallContact(p);
   updateWallRecontact(p, dt);
   p.wallJumpLockTimer = Math.max(0, p.wallJumpLockTimer - dt);
@@ -237,7 +281,7 @@ function resolveFrozenEnemyPlatforms(player, previousBottom) {
     const crossedTop = previousBottom <= enemy.y + CONFIG.interactions.frozenLandingTolerance && player.y + player.h >= enemy.y;
     if (horizontal && crossedTop && (!landing || enemy.y < landing.y)) landing = enemy;
   }
-  if (landing) { player.y = landing.y - player.h; player.vy = 0; player.grounded = true; player.frozenSupport = landing; }
+  if (landing) { player.y = landing.y - player.h; player.vy = 0; player.grounded = true; player.frozenSupport = landing; player.supportSurface = landing; }
 }
 function damagePlayer(amount, direction) {
   const p = gameState.player; if (!p || p.invulnerable > 0) return;
@@ -246,7 +290,7 @@ function damagePlayer(amount, direction) {
 }
 function killPlayer() {
   const p = gameState.player; if (p.retries <= 0) { finish("lose"); return; }
-  p.retries -= 1; p.health = CONFIG.player.health; p.x = p.respawn.x; p.y = p.respawn.y; p.vx = 0; p.vy = 0; p.grounded = false; p.wallContact = { left: false, right: false }; p.isWallSliding = false; p.wallJumpLockTimer = 0; p.wallJumpBlockedSide = null; p.wallDetachTimer = 0; p.invulnerable = CONFIG.player.invulnerability; gameState.projectiles = []; gameState.shards = []; clearGameplayInput();
+  p.retries -= 1; p.health = CONFIG.player.health; p.x = p.respawn.x; p.y = p.respawn.y; p.vx = 0; p.vy = 0; p.grounded = false; p.supportSurface = null; p.frozenSupport = null; p.wallContact = { left: false, right: false }; p.isWallSliding = false; p.wallJumpLockTimer = 0; p.wallJumpBlockedSide = null; p.wallDetachTimer = 0; p.invulnerable = CONFIG.player.invulnerability; gameState.projectiles = []; gameState.shards = []; clearGameplayInput();
   addEffect("text", p.x, p.y, CONFIG.colors.gold, CONFIG.effects.messageLife, `RESPAWN • ${p.retries} RETRIES`);
 }
 function activateCheckpoint() {
@@ -268,9 +312,15 @@ function shoot() {
 function updateEnemies(dt) {
   for (const e of gameState.enemies) {
     if (!e.alive || !validEntity(e)) continue;
+    const oldX = e.x;
     const wasFrozen = e.frozen > 0;
     e.hit = Math.max(0, e.hit - dt); e.frozen = Math.max(0, e.frozen - dt);
-    if (e.frozen > 0) { e.vx = 0; e.vy = 0; continue; }
+    if (e.frozen > 0) {
+      e.vx = 0; e.vy = 0;
+      resolveBody(e, dt, false);
+      e.surfaceDeltaX = e.x - oldX;
+      continue;
+    }
     if (wasFrozen) {
       const p = gameState.player;
       if (p?.frozenSupport === e) { p.y = Math.min(p.y, e.y - p.h); p.vy = -CONFIG.interactions.thawLiftSpeed; p.grounded = false; p.frozenSupport = null; }
@@ -279,6 +329,7 @@ function updateEnemies(dt) {
     if (e.type === "slime") { e.hopClock += dt; if (e.grounded && e.hopClock >= CONFIG.enemies.hopPeriod) { e.vy = -CONFIG.enemies.hopSpeed; e.vx = e.x < (e.minX+e.maxX)/2 ? CONFIG.enemies.fireSpeed : -CONFIG.enemies.fireSpeed; e.hopClock = 0; } }
     else { const speed = e.type === "ice" ? CONFIG.enemies.iceSpeed : CONFIG.enemies.fireSpeed; if (!e.vx) e.vx = speed; if (e.x <= e.minX) e.vx = speed; if (e.x + e.w >= e.maxX) e.vx = -speed; }
     e.vy = Math.min(CONFIG.physics.maxFall, e.vy + CONFIG.physics.gravity * dt); resolveBody(e, dt, false);
+    e.surfaceDeltaX = e.x - oldX;
   }
 }
 function projectileSolidHit(p) {
@@ -331,7 +382,7 @@ function cleanup() { gameState.projectiles = gameState.projectiles.filter(p => p
 function updateCamera(dt) { const target=Math.max(0,Math.min(CONFIG.level.width-CONFIG.canvas.width,gameState.player.x-CONFIG.camera.lead)); gameState.camera.x += (target-gameState.camera.x)*Math.min(1,CONFIG.camera.follow*dt); }
 function finish(result) { gameState.phase="gameover"; gameState.result=result; clearGameplayInput(); }
 function update(dt) {
-  if (gameState.phase !== "playing") return; gameState.time += dt; updateInput(dt); updatePlayer(dt); updateEnemies(dt); updateProjectiles(dt); updateShards(dt); updateEffects(dt); cleanup(); updateCamera(dt); gameState.input.pressed = {};
+  if (gameState.phase !== "playing") return; gameState.time += dt; updateInput(dt); updateEnemies(dt); updatePlayer(dt); updateProjectiles(dt); updateShards(dt); updateEffects(dt); cleanup(); updateCamera(dt); gameState.input.pressed = {};
 }
 
 function drawWorldRect(r, fill, stroke=CONFIG.colors.edge) { if (!r?.active) return; ctx.fillStyle=fill; ctx.fillRect(r.x,r.y,r.w,r.h); ctx.strokeStyle=stroke; ctx.strokeRect(r.x+.5,r.y+.5,r.w-1,r.h-1); }
@@ -341,6 +392,7 @@ function drawBackground() {
 }
 function renderLevel() {
   for (const p of gameState.platforms) drawWorldRect(p, p.kind === "platform" ? "#526a8d" : CONFIG.colors.ground);
+  for (const belt of gameState.conveyors) drawConveyor(belt);
   for (const s of gameState.slopes) { ctx.fillStyle=CONFIG.colors.ground; ctx.beginPath(); ctx.moveTo(s.x,s.y);ctx.lineTo(s.x+s.w,s.y-s.h);ctx.lineTo(s.x+s.w,s.y);ctx.closePath();ctx.fill();ctx.strokeStyle=CONFIG.colors.edge;ctx.stroke(); }
   drawWorldRect(gameState.wall,"#a45345",CONFIG.colors.explosion);
   if(gameState.wall?.active){ctx.strokeStyle="#ffd0bf";ctx.beginPath();ctx.moveTo(gameState.wall.x+5,gameState.wall.y+12);ctx.lineTo(gameState.wall.x+26,gameState.wall.y+45);ctx.lineTo(gameState.wall.x+10,gameState.wall.y+78);ctx.lineTo(gameState.wall.x+34,gameState.wall.y+112);ctx.stroke();}
@@ -350,12 +402,30 @@ function renderLevel() {
   const g=gameState.goal;ctx.fillStyle="#8bf7d0";ctx.fillRect(g.x,g.y,g.w,g.h);ctx.fillStyle="#132b35";ctx.fillRect(g.x+10,g.y+15,g.w-20,g.h-15);ctx.fillStyle="#8bf7d0";ctx.font=`${CONFIG.render.fontSmall}px sans-serif`;ctx.fillText("GOAL",g.x+7,g.y-8);
   if(!gameState.collectible.collected){const o=gameState.collectible,pulse=Math.sin(gameState.time*CONFIG.interactions.collectiblePulseSpeed)*CONFIG.interactions.collectiblePulseAmount;ctx.fillStyle=CONFIG.colors.gold;ctx.beginPath();ctx.arc(o.x,o.y,o.radius+pulse,0,CONFIG.render.pi2);ctx.fill();ctx.strokeStyle="#fff";ctx.stroke();}
 }
+function drawConveyor(belt) {
+  if (!belt?.active) return;
+  drawWorldRect(belt, "#29384e", "#b8d7e8");
+  const spacing = CONFIG.conveyor.visualStripeSpacing;
+  const offset = (gameState.time * CONFIG.conveyor.visualScrollSpeed * belt.direction) % spacing;
+  ctx.save(); ctx.beginPath(); ctx.rect(belt.x, belt.y, belt.w, belt.h); ctx.clip();
+  ctx.strokeStyle = "#d8f4ff"; ctx.fillStyle = "#d8f4ff"; ctx.lineWidth = 3;
+  for (let x = belt.x - spacing + offset; x < belt.x + belt.w + spacing; x += spacing) {
+    const centerY = belt.y + belt.h / 2;
+    ctx.beginPath();
+    ctx.moveTo(x - belt.direction * 8, centerY - 9);
+    ctx.lineTo(x + belt.direction * 7, centerY);
+    ctx.lineTo(x - belt.direction * 8, centerY + 9);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
 function renderEnemies() { for(const e of gameState.enemies){ctx.save();if(e.hit>0)ctx.globalAlpha=.45;ctx.fillStyle=e.frozen>0?CONFIG.colors.freeze:e.type==="fire"?CONFIG.colors.explosion:e.type==="slime"?CONFIG.colors.bounce:"#9abfff";ctx.fillRect(e.x,e.y,e.w,e.h);ctx.strokeStyle=e.frozen>0?"#fff":"#1b2034";ctx.lineWidth=e.frozen>0?4:2;ctx.strokeRect(e.x,e.y,e.w,e.h);if(e.frozen>0){ctx.fillStyle="#dff8ff";ctx.fillRect(e.x-3,e.y-5,e.w+6,5);if(e.frozen<=CONFIG.interactions.thawWarning){ctx.globalAlpha=.45+.35*Math.sin(gameState.time*CONFIG.interactions.switchPulseSpeed);ctx.fillStyle="#fff";ctx.fillRect(e.x,e.y,e.w,e.h);}}ctx.fillStyle="#172033";ctx.fillRect(e.x+8,e.y+10,5,5);ctx.fillRect(e.x+25,e.y+10,5,5);ctx.restore();} }
 function renderProjectiles(){for(const p of gameState.projectiles){ctx.strokeStyle=ammoColor(p.type);ctx.globalAlpha=.25;ctx.beginPath();for(const t of p.trail)ctx.lineTo(t.x,t.y);ctx.stroke();ctx.globalAlpha=1;ctx.fillStyle=ammoColor(p.type);ctx.beginPath();ctx.arc(p.x,p.y,p.radius,0,CONFIG.render.pi2);ctx.fill();ctx.strokeStyle="#fff";ctx.stroke();}}
 function renderShards(){for(const shard of gameState.shards){ctx.save();ctx.translate(shard.x,shard.y);ctx.rotate(shard.angle);ctx.fillStyle="#dff8ff";ctx.strokeStyle=CONFIG.colors.freeze;ctx.beginPath();ctx.moveTo(CONFIG.shatter.shardSize,0);ctx.lineTo(0,CONFIG.shatter.shardSize/2);ctx.lineTo(-CONFIG.shatter.shardSize,0);ctx.lineTo(0,-CONFIG.shatter.shardSize/2);ctx.closePath();ctx.fill();ctx.stroke();ctx.restore();}}
 function renderPlayer(){const p=gameState.player;if(!p)return;const blink=p.invulnerable>0&&Math.floor(gameState.time*CONFIG.render.playerBlinkRate)%2;ctx.globalAlpha=blink?.35:1;ctx.fillStyle=p.emptyFlash>0?CONFIG.colors.danger:CONFIG.colors.player;ctx.fillRect(p.x,p.y,p.w,p.h);ctx.fillStyle="#26334e";ctx.fillRect(p.x+17,p.y+9,6,6);ctx.globalAlpha=1;
   const mx=gameState.input.mouse.x+gameState.camera.x,my=gameState.input.mouse.y,a=Math.atan2(my-(p.y+p.h/2),mx-(p.x+p.w/2));ctx.strokeStyle="#d9efff";ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(p.x+p.w/2,p.y+p.h/2);ctx.lineTo(p.x+p.w/2+Math.cos(a)*28,p.y+p.h/2+Math.sin(a)*28);ctx.stroke();
-  p.ammo.forEach((type,index)=>{const ang=gameState.time*CONFIG.ammo.orbitSpeed+index*CONFIG.render.pi2/p.ammo.length,selected=index===p.selectedAmmoIndex,r=selected?8:5;ctx.fillStyle=ammoColor(type);ctx.beginPath();ctx.arc(p.x+p.w/2+Math.cos(ang)*CONFIG.ammo.orbitRadius,p.y+p.h/2+Math.sin(ang)*CONFIG.ammo.orbitRadius,r,0,CONFIG.render.pi2);ctx.fill();if(selected){ctx.strokeStyle="#fff";ctx.lineWidth=2;ctx.stroke();}});}
+  const facing=p.vx<0?-1:1,ordered=p.ammo.map((type,index)=>({type,index}));ordered.sort((a,b)=>(a.index===p.selectedAmmoIndex?-1:b.index===p.selectedAmmoIndex?1:a.index-b.index));
+  ordered.forEach(({type,index},slot)=>{const selected=index===p.selectedAmmoIndex,r=selected?8:5,x=p.x+p.w/2-facing*(CONFIG.ammo.followerSpacing*(slot+1)),y=p.y+p.h/2-CONFIG.ammo.followerLift+slot*2;ctx.fillStyle=ammoColor(type);ctx.beginPath();ctx.arc(x,y,r,0,CONFIG.render.pi2);ctx.fill();if(selected){ctx.strokeStyle="#fff";ctx.lineWidth=2;ctx.stroke();}});}
 function renderEffects(){for(const e of gameState.effects){const alpha=Math.max(0,e.life/e.maxLife);ctx.globalAlpha=alpha;if(e.type==="explosion"||e.type==="shatter"){ctx.fillStyle=e.color;ctx.beginPath();ctx.arc(e.x,e.y,e.type==="shatter"?CONFIG.shatter.flashRadius*(1-alpha*(1-CONFIG.shatter.flashStartScale)):CONFIG.projectile.explosionRadius*(1-alpha*.4),0,CONFIG.render.pi2);ctx.fill();}else if(e.type==="burst"||e.type==="destruction"){ctx.strokeStyle=e.color;ctx.lineWidth=5;const radius=(e.type==="destruction"?CONFIG.interactions.wallShardRadius:30)*(1-alpha);ctx.beginPath();ctx.arc(e.x,e.y,radius,0,CONFIG.render.pi2);ctx.stroke();if(e.type==="destruction"){for(let i=0;i<CONFIG.effects.particleCount;i++){const a=i*CONFIG.render.pi2/CONFIG.effects.particleCount;ctx.fillRect(e.x+Math.cos(a)*radius-2,e.y+Math.sin(a)*radius-2,4,4);}}}else{ctx.fillStyle=e.color;ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(e.text,e.x,e.y);}ctx.globalAlpha=1;}}
 function renderHud(){const p=gameState.player;ctx.fillStyle="#08101fdd";ctx.fillRect(16,16,470,74);ctx.fillStyle="#fff";ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(`HP ${"♥".repeat(Math.max(0,p.health))}   RETRIES ${p.retries}`,30,44);ctx.font=`${CONFIG.render.fontSmall}px sans-serif`;ctx.fillText("AMMO",30,72);if(!p.ammo.length){ctx.fillStyle="#8995ac";ctx.fillText("EMPTY — defeat enemies",92,72);}p.ammo.forEach((type,i)=>{const x=92+i*72;ctx.fillStyle=ammoColor(type);ctx.fillRect(x,58,14,14);ctx.fillStyle="#fff";ctx.fillText(type[0].toUpperCase(),x+20,71);if(i===p.selectedAmmoIndex)ctx.strokeRect(x-4,54,62,22);});ctx.fillStyle=gameState.collectible.collected?CONFIG.colors.gold:"#8995ac";ctx.fillText(`SECRET ${gameState.collectible.collected?"✓":"○"}`,385,71);}
 function overlay(title, lines, footer, color="#fff"){ctx.fillStyle=`rgba(5,9,20,${CONFIG.render.overlayAlpha})`;ctx.fillRect(0,0,CONFIG.canvas.width,CONFIG.canvas.height);ctx.textAlign="center";ctx.fillStyle=color;ctx.font=`900 ${CONFIG.render.fontLarge}px sans-serif`;ctx.fillText(title,CONFIG.canvas.width/2,145);ctx.font=`${CONFIG.render.fontMedium}px sans-serif`;lines.forEach((line,i)=>ctx.fillText(line,CONFIG.canvas.width/2,215+i*34));ctx.fillStyle=CONFIG.colors.gold;ctx.font=`bold ${CONFIG.render.fontMedium}px sans-serif`;ctx.fillText(footer,CONFIG.canvas.width/2,410);ctx.textAlign="left";}
