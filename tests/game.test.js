@@ -23,14 +23,18 @@ const windowStub = new EventTargetStub();
 const sandbox = { console, Math, Object, Boolean, Number, Set, document: { getElementById: () => canvas }, window: windowStub, requestAnimationFrame: noop };
 vm.createContext(sandbox);
 const gameSource = fs.readFileSync(path.join(__dirname, "..", "game.js"), "utf8");
-vm.runInContext(`${gameSource}\n;globalThis.testApi={CONFIG,gameState,resetGame,update,updateInput,updatePlayer,cycleAmmo,solids,explode,activateCheckpoint,finish};`, sandbox);
-const { CONFIG, gameState, resetGame, update, updateInput, updatePlayer, cycleAmmo, solids, explode, activateCheckpoint, finish } = sandbox.testApi;
+vm.runInContext(`${gameSource}\n;globalThis.testApi={CONFIG,gameState,createStartingAmmo,resetGame,update,updateInput,updatePlayer,cycleAmmo,solids,explode,activateCheckpoint,finish,shoot,damageEnemy};`, sandbox);
+const { CONFIG, gameState, createStartingAmmo, resetGame, update, updateInput, updatePlayer, cycleAmmo, solids, explode, activateCheckpoint, finish, shoot, damageEnemy } = sandbox.testApi;
 
 assert.equal(gameState.phase, "start");
 canvas.dispatch("mousedown", { button: 0 });
 assert.equal(gameState.phase, "playing", "left click starts the game without firing");
-cycleAmmo(1);
-assert.equal(gameState.player.selectedAmmoIndex, 0, "empty ammo remains safe");
+assert.deepEqual(Array.from(gameState.player.ammo), ["explosion", "bounce", "freeze"], "a new run receives the configured starting ammo in order");
+assert.equal(gameState.player.selectedAmmoIndex, 0, "explosion is initially selected");
+assert.notStrictEqual(gameState.player.ammo, CONFIG.player.startingAmmo, "runtime ammo does not alias configuration");
+gameState.player.ammo.pop();
+assert.deepEqual(Array.from(CONFIG.player.startingAmmo), ["explosion", "bounce", "freeze"], "gameplay mutations cannot change starting ammo configuration");
+resetGame();
 gameState.player.ammo = ["explosion"];
 cycleAmmo(1); cycleAmmo(-1);
 assert.equal(gameState.player.selectedAmmoIndex, 0, "one ammo remains selected");
@@ -40,6 +44,26 @@ cycleAmmo(-1); assert.equal(gameState.player.selectedAmmoIndex, 0);
 cycleAmmo(-1); assert.equal(gameState.player.selectedAmmoIndex, 2, "reverse selection wraps");
 assert(canvas.dispatch("wheel", { deltaY: 1 }).defaultPrevented, "canvas wheel scrolling is prevented");
 assert.equal(gameState.player.selectedAmmoIndex, 0, "wheel selection wraps forward");
+
+resetGame();
+gameState.input.mouse.x = gameState.player.x + 200;
+gameState.input.mouse.y = gameState.player.y;
+shoot();
+assert.deepEqual(Array.from(gameState.player.ammo), ["bounce", "freeze"], "shooting consumes the selected explosion and leaves a valid inventory");
+assert.equal(gameState.player.selectedAmmoIndex, 0);
+resetGame();
+damageEnemy(gameState.enemies[0], CONFIG.enemies.health);
+damageEnemy(gameState.enemies[1], CONFIG.enemies.health);
+assert.deepEqual(Array.from(gameState.player.ammo), ["explosion", "bounce", "freeze", "explosion", "bounce"], "enemy ammo appends in acquisition order up to capacity");
+damageEnemy(gameState.enemies[2], CONFIG.enemies.health);
+assert.deepEqual(Array.from(gameState.player.ammo), ["explosion", "bounce", "freeze", "explosion", "bounce"], "enemy ammo is discarded at capacity");
+
+const configuredStartingAmmo = CONFIG.player.startingAmmo;
+CONFIG.player.startingAmmo = ["invalid", "freeze", "bounce", "explosion", "freeze", "bounce"];
+assert.deepEqual(Array.from(createStartingAmmo()), ["freeze", "bounce", "explosion", "freeze", "bounce"], "starting ammo rejects invalid types and clamps to capacity");
+CONFIG.player.startingAmmo = null;
+assert.deepEqual(Array.from(createStartingAmmo()), [], "an absent starting loadout initializes safely");
+CONFIG.player.startingAmmo = configuredStartingAmmo;
 
 function groundJump(source) {
   resetGame();
@@ -108,6 +132,8 @@ assert.equal(gameState.phase, "gameover");
 assert.equal(gameState.input.mouse.down, false); assert.equal(gameState.input.mouse.jumpDown, false, "phase changes clear held mouse input");
 windowStub.dispatch("keydown", { code: "KeyR" });
 assert.equal(gameState.phase, "playing", "R restarts after game over");
+assert.deepEqual(Array.from(gameState.player.ammo), ["explosion", "bounce", "freeze"], "a full restart restores starting ammo in order");
+assert.equal(gameState.player.selectedAmmoIndex, 0, "a full restart selects explosion");
 
 function heldWallClimb(side) {
   resetGame();
