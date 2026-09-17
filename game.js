@@ -4,7 +4,7 @@
 const CONFIG = Object.freeze({
   canvas: { width: 960, height: 540 },
   physics: { gravity: 1800, maxFall: 900, epsilon: 0.01, maxDt: 0.033 },
-  player: { width: 30, height: 42, startX: 90, startY: 420, accel: 1900, airAccel: 1050, decel: 2200, maxSpeed: 270, jump: 610, jumpCut: 0.48, health: 4, invulnerability: 1.1, retries: 2, shotCooldown: 0.18, knockback: 560, wallSlideMaxFallSpeed: 155, wallJumpHorizontalSpeed: 335, wallJumpVerticalSpeed: 590, wallContactTolerance: 2, wallJumpControlLockDuration: 0.14, wallRecontactDuration: 0.08 },
+  player: { width: 30, height: 42, startX: 90, startY: 420, accel: 1900, airAccel: 1050, decel: 2200, maxSpeed: 270, jump: 610, jumpCut: 0.48, health: 4, invulnerability: 1.1, retries: 2, shotCooldown: 0.18, knockback: 560, wallSlideMaxFallSpeed: 155, wallJumpHorizontalSpeed: 145, wallJumpVerticalSpeed: 610, wallContactTolerance: 2, wallJumpControlLockDuration: 0.035, wallRecontactDuration: 0.05 },
   camera: { follow: 5.5, lead: 300 },
   ammo: { capacity: 5, orbitRadius: 35, orbitSpeed: 1.8 },
   projectile: { radius: 7, speed: 570, inherit: 0.18, lifetime: 4, damage: 1, bounceCount: 3, restitution: 0.82, explosionRadius: 105, freezeDuration: 5 },
@@ -164,10 +164,13 @@ function updatePlayer(dt) {
     if (direction) p.vx = Math.max(-CONFIG.player.maxSpeed, Math.min(CONFIG.player.maxSpeed, p.vx + direction * acceleration * dt));
     else { const decel = CONFIG.player.decel * dt; p.vx = Math.abs(p.vx) <= decel ? 0 : p.vx - Math.sign(p.vx) * decel; }
   }
-  if (i.jump.pressed) {
-    const wallSide = !p.grounded ? getWallJumpSide(p) : null;
+  const wallSide = !p.grounded ? getWallJumpSide(p) : null;
+  // Held jump may use a newly re-contacted wall. wallJumpBlockedSide still
+  // requires a real detach first, so uninterrupted contact cannot retrigger it.
+  const wantsWallJump = wallSide && (i.jump.pressed || i.jump.held) && p.wallJumpLockTimer <= 0;
+  if (i.jump.pressed || wantsWallJump) {
     if (p.grounded) { p.vy = -CONFIG.player.jump; p.grounded = false; }
-    else if (wallSide) {
+    else if (wantsWallJump) {
       p.vx = wallSide === "left" ? CONFIG.player.wallJumpHorizontalSpeed : -CONFIG.player.wallJumpHorizontalSpeed;
       p.vy = -CONFIG.player.wallJumpVerticalSpeed; p.wallJumpLockTimer = CONFIG.player.wallJumpControlLockDuration;
       p.wallJumpBlockedSide = wallSide; p.wallDetachTimer = 0;
